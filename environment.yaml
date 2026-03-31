@@ -21,11 +21,10 @@ dependencies:
   - pandas
   - scipy
   - scikit-learn
-  - scikit-image       # marching cubes (skimage.measure.marching_cubes)
+  - scikit-image       # optional fallback for SDF visualisation; primary mesh extraction uses convex hull
   - matplotlib
   - tqdm
   - pyyaml
-  - plyfile            # read/write .ply point clouds without Open3D
 
   # ── pip-installed packages ─────────────────────────────────────────────────
   - pip
@@ -36,19 +35,17 @@ dependencies:
     - torch==2.8.0
     - torchvision==0.23.0
 
-    # PyTorch Geometric 2.7.0
+    # PyTorch Geometric 2.7.0 + required extension wheels (cp312, linux, pt28+cu128)
     # Matches INSTALL.md: torch_geometric==2.7.0
-    - torch_geometric==2.7.0
-
-    # PyG extension wheels — exact cp312 Linux builds for torch-2.8+cu128
     # Source: https://data.pyg.org/whl/torch-2.8.0+cu128.html
-    - https://data.pyg.org/whl/torch-2.8.0%2Bcu128/torch_cluster-1.6.3%2Bpt28cu128-cp312-cp312-linux_x86_64.whl
-    - https://data.pyg.org/whl/torch-2.8.0%2Bcu128/torch_scatter-2.1.2%2Bpt28cu128-cp312-cp312-linux_x86_64.whl
-    - https://data.pyg.org/whl/torch-2.8.0%2Bcu128/torch_sparse-0.6.18%2Bpt28cu128-cp312-cp312-linux_x86_64.whl
-    - https://data.pyg.org/whl/torch-2.8.0%2Bcu128/torch_spline_conv-1.2.2%2Bpt28cu128-cp312-cp312-linux_x86_64.whl
-    - https://data.pyg.org/whl/torch-2.8.0%2Bcu128/pyg_lib-0.6.0%2Bpt28cu128-cp312-cp312-linux_x86_64.whl
+    - torch_geometric==2.7.0
+    - --find-links https://data.pyg.org/whl/torch-2.8.0+cu128.html
+    - torch_cluster==1.6.3
+    - torch_scatter==2.1.2
+    - torch_sparse==0.6.18
+    - torch_spline_conv==1.2.2
 
-    # Point cloud I/O and visualisation
+    # Point cloud I/O and visualisation (also provides convex hull for volume extraction)
     # Matches INSTALL.md: open3d==0.19.0
     - open3d==0.19.0
 
@@ -66,3 +63,7 @@ dependencies:
 
     # Experiment logging
     - tensorboard
+
+    # NOTE: pytorch_fpsample must be installed manually after activating this
+    # environment. See INSTALL.md for instructions:
+    #   cd pytorch_fpsample && pip install --no-deps . && cd ..
