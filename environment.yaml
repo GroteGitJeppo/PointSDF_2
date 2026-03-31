@@ -66,4 +66,3 @@ dependencies:
 
     # Experiment logging
     - tensorboard
-    - --no-deps ./pytorch_fpsample
