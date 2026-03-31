@@ -66,4 +66,4 @@ dependencies:
 
     # NOTE: pytorch_fpsample must be installed manually after activating this
     # environment. See INSTALL.md for instructions:
-    #   cd pytorch_fpsample && pip install --no-deps . && cd ..
+    #   cd pytorch_fpsample && pip install --no-deps --no-build-isolation .
