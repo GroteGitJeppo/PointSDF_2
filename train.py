@@ -1,144 +1,223 @@
-## thanks to: https://colab.research.google.com/drive/1D45E5bUK3gQ40YpZo65ozs7hg5l-eo_U?usp=sharing#scrollTo=hUbRw_BhLuXr
+"""
+Stage 2 — PointNet++ encoder training.
 
-import warnings
-warnings.filterwarnings("ignore")
+Trains the encoder to predict latent codes from partial point clouds,
+supervised by the Stage 1 latent codes stored on disk.
+The Stage 1 decoder is loaded but kept frozen.
 
+Saves:
+  <output_dir>/
+    encoder.pth            — best encoder weights
+    checkpoint.pth         — full checkpoint (encoder + decoder state dicts)
+    config.yaml
+    events.out.tfevents.*
+
+Usage:
+    python train.py --config configs/train_encoder.yaml
+"""
+
+import argparse
 import os
-from pathlib import Path
 import random
-import numpy as np
+import time
+import warnings
+from datetime import datetime
+from pathlib import Path
 
+import numpy as np
 import torch
-import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-import torch_geometric.transforms as T
-from torch_geometric.loader import DataLoader, ImbalancedSampler
+import yaml
+from torch.utils.tensorboard import SummaryWriter
+
+from torch_geometric.loader import DataLoader
 from torch_geometric.typing import WITH_TORCH_CLUSTER
 
-from data import *
-from utils import *
-from models import *
-model_dict = {'pointraft': PointRAFT}
+from data.encoder_dataset import PointCloudLatentDataset
+from models import PointNetEncoder, SDFDecoder
 
+warnings.filterwarnings('ignore')
 
 if not WITH_TORCH_CLUSTER:
-    quit("This code requires 'torch-cluster'")
+    raise SystemExit("This code requires 'torch-cluster'")
 
+
+# ---------------------------------------------------------------------------
+# Training / validation steps
+# ---------------------------------------------------------------------------
+
+def train_epoch(encoder, optimizer, loader, sigma, device):
+    encoder.train()
+    total_loss = total_mse = total_reg = 0.0
+
+    for batch in loader:
+        batch = batch.to(device)
+        latent_gt = batch.latent  # (B, latent_size), set by PointCloudLatentDataset
+
+        pred_latent = encoder(batch)  # (B, latent_size)
+
+        mse = F.mse_loss(pred_latent, latent_gt.detach())
+        reg = sigma ** 2 * pred_latent.norm(dim=1).mean()
+        loss = mse + reg
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        total_mse += mse.item()
+        total_reg += reg.item()
+
+    n = len(loader)
+    return total_loss / n, total_mse / n, total_reg / n
+
+
+@torch.no_grad()
+def val_epoch(encoder, loader, sigma, device):
+    encoder.eval()
+    total_loss = total_mse = total_reg = 0.0
+
+    for batch in loader:
+        batch = batch.to(device)
+        latent_gt = batch.latent
+
+        pred_latent = encoder(batch)
+
+        mse = F.mse_loss(pred_latent, latent_gt)
+        reg = sigma ** 2 * pred_latent.norm(dim=1).mean()
+        loss = mse + reg
+
+        total_loss += loss.item()
+        total_mse += mse.item()
+        total_reg += reg.item()
+
+    n = len(loader)
+    return total_loss / n, total_mse / n, total_reg / n
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main(cfg: dict):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f'Device: {device}')
+
+    torch.manual_seed(cfg.get('seed', 133))
+    random.seed(cfg.get('seed', 133))
+    np.random.seed(cfg.get('seed', 133))
+
+    run_tag = datetime.now().strftime('%d_%m_%H%M%S')
+    output_dir = os.path.join(cfg['output_dir'], run_tag)
+    os.makedirs(output_dir, exist_ok=True)
+
+    with open(os.path.join(output_dir, 'config.yaml'), 'w') as f:
+        yaml.dump(cfg, f)
+    writer = SummaryWriter(log_dir=output_dir)
+
+    # ----- Load Stage 1 decoder (frozen) -----
+    decoder_cfg_path = cfg['decoder_config']
+    with open(decoder_cfg_path) as f:
+        decoder_cfg = yaml.safe_load(f)
+
+    decoder = SDFDecoder(
+        latent_size=decoder_cfg['latent_size'],
+        num_layers=decoder_cfg['num_layers'],
+        inner_dim=decoder_cfg['inner_dim'],
+        skip_connections=decoder_cfg['skip_connections'],
+    ).float().to(device)
+    decoder.load_state_dict(torch.load(cfg['decoder_weights'], map_location=device))
+    for p in decoder.parameters():
+        p.requires_grad_(False)
+    decoder.eval()
+    print(f'Loaded frozen decoder from {cfg["decoder_weights"]}')
+
+    # ----- Datasets -----
+    train_ds = PointCloudLatentDataset(
+        data_root=cfg['data_root'],
+        splits_csv=cfg['splits_csv'],
+        latent_dir=cfg['latent_dir'],
+        split='train',
+        num_points=cfg.get('num_points', 1024),
+        apply_augmentation=True,
+    )
+    val_ds = PointCloudLatentDataset(
+        data_root=cfg['data_root'],
+        splits_csv=cfg['splits_csv'],
+        latent_dir=cfg['latent_dir'],
+        split='val',
+        num_points=cfg.get('num_points', 1024),
+        apply_augmentation=False,
+    )
+
+    train_loader = DataLoader(
+        train_ds, batch_size=cfg.get('batch_size', 16),
+        shuffle=True, num_workers=4,
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=cfg.get('batch_size', 16),
+        shuffle=False, num_workers=4,
+    )
+
+    # ----- Encoder -----
+    encoder = PointNetEncoder(latent_size=decoder_cfg['latent_size']).to(device)
+
+    optimizer = optim.Adam(
+        encoder.parameters(),
+        lr=cfg.get('lr', 0.001),
+        weight_decay=cfg.get('weight_decay', 1e-4),
+    )
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=cfg.get('lr_gamma', 0.97))
+
+    sigma = cfg.get('sigma_regulariser', 0.01)
+
+    # ----- Training loop -----
+    best_val_loss = float('inf')
+    for epoch in range(1, cfg.get('epochs', 100) + 1):
+        t0 = time.time()
+        train_loss, train_mse, train_reg = train_epoch(encoder, optimizer, train_loader, sigma, device)
+        val_loss, val_mse, val_reg = val_epoch(encoder, val_loader, sigma, device)
+        elapsed = time.time() - t0
+
+        print(
+            f'Epoch {epoch:03d}/{cfg.get("epochs", 100)} | '
+            f'train {train_loss:.5f} (mse={train_mse:.5f}) | '
+            f'val {val_loss:.5f} (mse={val_mse:.5f}) | '
+            f'{elapsed:.1f}s'
+        )
+
+        writer.add_scalar('Loss/train', train_loss, epoch)
+        writer.add_scalar('Loss/train_mse', train_mse, epoch)
+        writer.add_scalar('Loss/val', val_loss, epoch)
+        writer.add_scalar('Loss/val_mse', val_mse, epoch)
+        writer.add_scalar('LR', scheduler.get_last_lr()[0], epoch)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(encoder.state_dict(), os.path.join(output_dir, 'encoder.pth'))
+            torch.save({
+                'epoch': epoch,
+                'encoder_state_dict': encoder.state_dict(),
+                'decoder_state_dict': decoder.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': val_loss,
+            }, os.path.join(output_dir, 'checkpoint.pth'))
+            print(f'  Saved best model (val {best_val_loss:.5f})')
+
+        scheduler.step()
+
+    writer.close()
+    print(f'\nTraining complete. Best val loss: {best_val_loss:.5f}')
+    print(f'Outputs in: {output_dir}')
 
 
 if __name__ == '__main__':
-    torch.manual_seed(133)
-    random.seed(133)
-    np.random.seed(133)
+    parser = argparse.ArgumentParser(description='Stage 2: encoder training')
+    parser.add_argument('--config', '-c', required=True, help='Path to YAML config file')
+    args = parser.parse_args()
 
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
 
-    ## File paths
-    current_file = Path(__file__).resolve()
-    project_root = current_file.parent
-    datafolder = os.path.join(project_root, 'data', '3DPotatoTwin')
-
-    data_root = os.path.join(datafolder, '1_rgbd', '2_pcd')
-    splits_csv = os.path.join(datafolder, 'splits.csv')
-    target_csv = os.path.join(datafolder, 'ground_truth.csv')
-
-    weightsfolder = os.path.join(project_root, 'weights')
-    os.makedirs(weightsfolder, exist_ok=True)
-
-
-    ## Data preprocessing and augmentation
-    pre_transform = T.Center()
-    transform = T.Compose([T.RandomJitter(0.0005), 
-                           T.RandomRotate(2, axis=0), 
-                           T.RandomRotate(2, axis=1), 
-                           T.RandomRotate(2, axis=2),
-                           T.RandomFlip(axis=0, p=0.5),
-                           T.RandomFlip(axis=1, p=0.5),
-                           T.RandomShear(0.2)])
-
-
-    ## Create/load InMemoryDatasets
-    ## Please remove the "processed" folder in your data_root if you want to redo the data augmentation!
-    train_dataset = PointCloudDataset(data_root, 
-                                      splits_csv, 
-                                      target_csv, 
-                                      target_col="weight_g_inctack", 
-                                      class_col="weight_class", 
-                                      split="train",
-                                      conveyor_depth={'2023': 0.345, '2024': 0.460, '2025': 0.465},
-                                      search_col="growing_season",
-                                      max_height=0.08,
-                                      pre_transform=pre_transform, 
-                                      transform=transform, 
-                                      num_points=1024, 
-                                      apply_augmentation=True)
-    
-    val_dataset = PointCloudDataset(data_root, 
-                                    splits_csv, 
-                                    target_csv, 
-                                    target_col="weight_g_inctack", 
-                                    split="val",
-                                    conveyor_depth={'2023': 0.345, '2024': 0.460, '2025': 0.465},
-                                    search_col="growing_season",
-                                    max_height=0.08,
-                                    pre_transform=pre_transform, 
-                                    transform=transform, 
-                                    num_points=1024, 
-                                    apply_augmentation=False)
-
-
-    ## Dataloaders
-    train_sampler = ImbalancedSampler(train_dataset.cls)
-    train_loader = DataLoader(train_dataset, batch_size=32, sampler=train_sampler, num_workers=6)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=6)
-
-
-    ## Initialize the training parameters
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model_name = 'pointraft'
-    visualize = False
-    model = model_dict[model_name]().to(device)
-
-    criterion = nn.SmoothL1Loss(beta=20)
-    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=0.0001)
-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.97)
-
-    if visualize:
-        visualize_batch(train_loader)
-        visualize_augmentation(train_loader, pre_transform)
-
-
-    ## Training
-    best_loss = float('inf')
-    for epoch in range(1, 51):
-        model.train()
-        train_loss = 0
-        for train_data in train_loader:
-            train_data = train_data.to(device)
-            optimizer.zero_grad()
-            pred = model(train_data)
-            target = train_data.y
-            loss = criterion(pred, target)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
-
-        train_loss /= len(train_loader)
-
-        model.eval()
-        val_loss = 0
-        for val_data in val_loader:
-            val_data = val_data.to(device)
-            with torch.no_grad():
-                pred = model(val_data)
-                target = val_data.y
-                loss = criterion(pred, target)
-                val_loss  += loss.item()
-                
-        val_loss /= len(val_loader)
-
-        print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.5f}, Val Loss: {val_loss:.5f}')
-        if val_loss < best_loss:
-            best_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(weightsfolder, model_name + '.pth'))
-            print('Saved best model!')
-        scheduler.step()
+    main(cfg)

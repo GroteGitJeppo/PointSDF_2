@@ -1,0 +1,37 @@
+# ============================================================
+# Stage 2 config: PointNet++ encoder training
+# Update the paths below to match your server layout.
+# ============================================================
+
+# ---- Data (server paths) -----------------------------------
+data_root:  data/3DPotatoTwin/1_rgbd/2_pcd
+splits_csv: data/3DPotatoTwin/splits.csv
+target_csv: data/3DPotatoTwin/ground_truth.csv
+
+# Directory of per-label latent codes produced by Stage 1.
+# Each file: <latent_dir>/<label>.pth  (single tensor of shape latent_size)
+# Set this to the latent_codes/ subfolder of the best Stage 1 run.
+latent_dir: weights/deepsdf/<run_tag>/latent_codes
+
+# ---- Stage 1 decoder (frozen) ------------------------------
+# Path to the decoder.pth saved by Stage 1
+decoder_weights: weights/deepsdf/<run_tag>/decoder.pth
+# Path to the Stage 1 config (used to read architecture params)
+decoder_config:  configs/train_deepsdf.yaml
+
+# ---- Output ------------------------------------------------
+output_dir: weights/encoder
+
+# ---- Encoder training --------------------------------------
+seed:              133
+epochs:            100
+batch_size:        16
+num_points:        1024
+lr:                0.001
+weight_decay:      0.0001
+lr_gamma:          0.97      # ExponentialLR gamma per epoch
+sigma_regulariser: 0.01      # weight of the latent L2 regulariser
+
+# ---- Inference / test settings -----------------------------
+grid_resolution: 64          # resolution^3 SDF query points per sample
+grid_bbox:       0.15        # half-extent of the bounding box (metres)

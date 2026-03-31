@@ -1,0 +1,43 @@
+# ============================================================
+# Stage 1 config: DeepSDF autodecoder training
+# Update the paths below to match your server layout.
+# ============================================================
+
+# ---- Data (server paths) -----------------------------------
+# Directory containing one sub-folder per potato label, each
+# with a samples.npz file produced by an SDF extraction script.
+# Format: <sdf_data_dir>/<label>/samples.npz
+#   'pos': (N, 4) [x, y, z, sdf_value > 0]
+#   'neg': (M, 4) [x, y, z, sdf_value < 0]
+sdf_data_dir: data/3DPotatoTwin/3_sdf
+splits_csv:   data/3DPotatoTwin/splits.csv
+
+# ---- Output ------------------------------------------------
+output_dir: weights/deepsdf
+
+# ---- Architecture ------------------------------------------
+# These values MUST match when loading the decoder in Stage 2.
+latent_size:       64
+num_layers:        8
+inner_dim:         256
+skip_connections:  true
+
+# ---- Training ----------------------------------------------
+seed:              42
+epochs:            500
+batch_size:        8192   # large batches work well for SDF point samples
+lr_model:          0.0001
+lr_latent:         0.001
+sigma_regulariser: 0.01   # weight of the L2 latent regulariser
+loss_multiplier:   1.0
+clamp:             true
+clamp_value:       0.1    # clamp SDF predictions to [-0.1, 0.1]
+
+# ---- LR scheduling -----------------------------------------
+lr_scheduler:  true
+lr_multiplier: 0.9        # ReduceLROnPlateau factor
+patience:      20         # epochs without improvement before reducing LR
+
+# ---- Resume from checkpoint --------------------------------
+pretrained:   false
+pretrain_dir: ''          # path to a previous output_dir/<run_tag>/ folder
