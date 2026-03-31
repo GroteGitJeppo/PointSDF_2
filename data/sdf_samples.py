@@ -6,15 +6,33 @@ import torch
 from torch.utils.data import Dataset
 
 
+def resolve_samples_npz(sdf_data_dir: str, label: str) -> str | None:
+    """
+    Find samples.npz for a potato label.
+
+    Tries, in order (corepp layout first, then flat layout):
+        <sdf_data_dir>/<label>/laser/samples.npz
+        <sdf_data_dir>/<label>/samples.npz
+    """
+    candidates = (
+        os.path.join(sdf_data_dir, label, 'laser', 'samples.npz'),
+        os.path.join(sdf_data_dir, label, 'samples.npz'),
+    )
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 class SDFSamplesDataset(Dataset):
     """
     Dataset of SDF samples for Stage 1 (DeepSDF autodecoder training).
 
-    Expected directory layout on the server:
-        sdf_data_dir/
-          <label>/
-            samples.npz   # 'pos': (N, 4) — [x, y, z, sdf>0]
-                          # 'neg': (M, 4) — [x, y, z, sdf<0]
+    Expected directory layout on the server (either works):
+        sdf_data_dir/<label>/laser/samples.npz   # corepp default
+        sdf_data_dir/<label>/samples.npz         # flat layout
+
+    Each file contains 'pos' / 'neg' arrays (N, 4) — [x, y, z, sdf].
 
     Each potato is assigned a contiguous integer index used to address the
     learnable latent code table in train_deepsdf.py.
@@ -46,8 +64,8 @@ class SDFSamplesDataset(Dataset):
         all_sdf = []
 
         for label in sorted(labels):
-            npz_path = os.path.join(sdf_data_dir, label, 'samples.npz')
-            if not os.path.exists(npz_path):
+            npz_path = resolve_samples_npz(sdf_data_dir, label)
+            if npz_path is None:
                 continue
 
             data = np.load(npz_path)

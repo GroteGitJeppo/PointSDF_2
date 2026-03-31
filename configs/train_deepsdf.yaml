@@ -4,12 +4,11 @@
 # ============================================================
 
 # ---- Data (server paths) -----------------------------------
-# Directory containing one sub-folder per potato label, each
-# with a samples.npz file produced by an SDF extraction script.
-# Format: <sdf_data_dir>/<label>/samples.npz
-#   'pos': (N, 4) [x, y, z, sdf_value > 0]
-#   'neg': (M, 4) [x, y, z, sdf_value < 0]
-sdf_data_dir: data/3DPotatoTwin/3_sdf
+# Root with one sub-folder per potato label. samples.npz is resolved as:
+#   <sdf_data_dir>/<label>/laser/samples.npz   (corepp) — tried first
+#   <sdf_data_dir>/<label>/samples.npz         (flat)    — fallback
+# Arrays: 'pos' / 'neg' each (N, 4) [x, y, z, sdf]
+sdf_data_dir: data/3DPotatoTwin/sdfsamples/potato
 splits_csv:   data/3DPotatoTwin/splits.csv
 
 # ---- Output ------------------------------------------------
