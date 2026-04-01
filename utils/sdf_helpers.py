@@ -1,4 +1,4 @@
-"""Shared utilities for PointSDF_2."""
+"""SDF grid, mesh extraction, and DeepSDF loss helpers."""
 
 import torch
 import torch.utils.dlpack
