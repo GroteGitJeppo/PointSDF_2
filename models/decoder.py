@@ -1,5 +1,3 @@
-import copy
-
 import torch
 import torch.nn as nn
 
@@ -38,7 +36,9 @@ class SDFDecoder(nn.Module):
         for _ in range(num_layers - num_extra_layers):
             layers.append(
                 nn.Sequential(
-                    nn.utils.weight_norm(nn.Linear(input_dim, inner_dim)),
+                    nn.utils.parametrizations.weight_norm(
+                        nn.Linear(input_dim, inner_dim)
+                    ),
                     nn.ReLU(),
                 )
             )

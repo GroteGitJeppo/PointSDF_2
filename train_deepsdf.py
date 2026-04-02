@@ -18,6 +18,7 @@ Usage:
 import argparse
 import math
 import os
+import sys
 import time
 from datetime import datetime
 
@@ -26,6 +27,7 @@ import torch
 import torch.optim as optim
 import yaml
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from data.sdf_scene_dataset import SDFSceneDataset
 from models import SDFDecoder
@@ -155,7 +157,19 @@ def train_epoch(
     ramp_epochs = int(cfg.get('reg_ramp_epochs', 100))
     loss_mult = float(cfg.get('loss_multiplier', 1.0))
 
-    for scene_order_idx in order:
+    num_epochs_cfg = int(cfg.get('epochs', 1))
+    use_tqdm = cfg.get('tqdm', True)
+    scene_iter = order
+    if use_tqdm:
+        scene_iter = tqdm(
+            order,
+            desc=f'Epoch {epoch_1based}/{num_epochs_cfg} scenes',
+            leave=True,
+            file=sys.stdout,
+            mininterval=0.5,
+        )
+
+    for scene_order_idx in scene_iter:
         sample = scene_ds[scene_order_idx]
         sdf_data = sample['sdf_data']
         latent_idx = int(sample['latent_idx'])
@@ -210,13 +224,16 @@ def train_epoch(
         total_l1 += scene_l1
         total_reg += scene_reg
 
+        if use_tqdm:
+            scene_iter.set_postfix(loss=f'{scene_loss:.4f}', refresh=False)
+
     n = len(scene_ds)
     return total_loss / n, total_l1 / n, total_reg / n
 
 
 def main(cfg: dict):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Device: {device}')
+    print(f'Device: {device}', flush=True)
 
     seed = int(cfg.get('seed', 42))
     torch.manual_seed(seed)
