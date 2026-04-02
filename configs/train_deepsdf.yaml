@@ -1,5 +1,5 @@
 # ============================================================
-# Stage 1 config: DeepSDF autodecoder (corepp-style training)
+# Stage 1 config: DeepSDF autodecoder (PointSDF_2)
 # Update paths to match your server layout.
 # ============================================================
 
@@ -11,7 +11,7 @@ splits_csv:   data/3DPotatoTwin/splits.csv
 # Labels from these splits get Stage 1 latents (test excluded for holdout).
 stage1_splits: [train, val]
 
-# Random SDF points drawn per shape per optimiser step (corepp SamplesPerScene).
+# Random SDF points drawn per shape per optimiser step (samples_per_scene).
 samples_per_scene: 16384
 # Split one shape's samples into this many chunks before one backward (memory).
 batch_split: 1
@@ -32,7 +32,7 @@ loss_multiplier:   1.0
 clamp:             true
 clamp_value:       0.1
 
-# corepp-style latent regularisation (ramped over reg_ramp_epochs)
+# Latent L2 / sphere regularisation (ramped over reg_ramp_epochs)
 code_regularization:         true
 code_regularization_sphere:  false
 code_regularization_lambda:  0.0001
@@ -47,7 +47,7 @@ code_bound: null
 gradient_clip_norm: null
 
 # ---- Learning rates (two entries: decoder, then latents) ---
-# Types: Constant | Step | Warmup  (same semantics as corepp train_deep_sdf)
+# Types: Constant | Step | Warmup
 learning_rate_schedule:
   - Type: Constant
     Value: 0.0001

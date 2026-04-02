@@ -10,7 +10,7 @@ def resolve_samples_npz(sdf_data_dir: str, label: str) -> str | None:
     """
     Find samples.npz for a potato label.
 
-    Tries, in order (corepp layout first, then flat layout):
+    Tries, in order (nested laser/ layout first, then flat layout):
         <sdf_data_dir>/<label>/laser/samples.npz
         <sdf_data_dir>/<label>/samples.npz
     """
@@ -29,7 +29,7 @@ class SDFSamplesDataset(Dataset):
     Dataset of SDF samples for Stage 1 (DeepSDF autodecoder training).
 
     Expected directory layout on the server (either works):
-        sdf_data_dir/<label>/laser/samples.npz   # corepp default
+        sdf_data_dir/<label>/laser/samples.npz   # preferred layout
         sdf_data_dir/<label>/samples.npz         # flat layout
 
     Each file contains 'pos' / 'neg' arrays (N, 4) — [x, y, z, sdf].

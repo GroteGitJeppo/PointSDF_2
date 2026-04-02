@@ -1,9 +1,9 @@
 """
-Per-shape SDF sample dataset for Stage 1 (corepp-style).
+Per-shape SDF sample dataset for Stage 1 (train_deepsdf.py).
 
 One __getitem__ per potato: loads samples.npz from disk and returns a random
-subsample of `samples_per_scene` points (half pos / half neg), matching
-corepp's unpack_sdf_samples behaviour.
+subsample of `samples_per_scene` points (half positive / half negative SDF
+samples), same subsampling idea as classic DeepSDF data loaders.
 """
 
 import os

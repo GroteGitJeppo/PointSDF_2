@@ -31,7 +31,7 @@ def get_volume_coords(resolution: int = 64, bbox: float = 0.15) -> torch.Tensor:
 def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
     """
     Extract a watertight mesh from SDF predictions using convex hull.
-    Adapted from corepp/utils.py (sdf2mesh_cuda).
+    Convex-hull mesh extraction used in this repo for volume estimation.
 
     Strategy: keep all grid points where SDF < t (predicted interior), then
     compute the convex hull.  If the result is not watertight, iteratively
@@ -118,7 +118,7 @@ def sdf_loss(
     return l1 + l2, l1, l2
 
 
-def sdf_loss_corepp_chunk(
+def sdf_autodecoder_loss_chunk(
     pred_sdf: torch.Tensor,
     target_sdf: torch.Tensor,
     latent_vecs: torch.Tensor,
@@ -130,8 +130,9 @@ def sdf_loss_corepp_chunk(
     do_code_regularization_sphere: bool,
 ):
     """
-    One backward chunk matching corepp train_deep_sdf: L1 sum / num_scene_samples
-    plus optional ramped latent regularisers (same denominator).
+    Loss for one gradient chunk in Stage 1: L1 sum over the chunk divided by
+    total samples in the scene, plus optional ramped latent regularisers
+    (same denominator), as used in train_deepsdf.py.
     """
     loss_l1 = F.l1_loss(pred_sdf, target_sdf, reduction='sum') / num_sdf_samples_scene
     chunk_loss = loss_l1

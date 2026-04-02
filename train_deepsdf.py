@@ -1,5 +1,5 @@
 """
-Stage 1 — DeepSDF autodecoder training (corepp-style loop).
+Stage 1 — DeepSDF autodecoder training.
 
 Trains the SDF decoder jointly with per-shape latent codes. One optimiser step
 per shape per epoch, random subsample of SDF points per shape.
@@ -29,11 +29,11 @@ from torch.utils.tensorboard import SummaryWriter
 
 from data.sdf_scene_dataset import SDFSceneDataset
 from models import SDFDecoder
-from utils import sdf_loss_corepp_chunk
+from utils import sdf_autodecoder_loss_chunk
 
 
 # ---------------------------------------------------------------------------
-# Learning rate schedules (from corepp train_deep_sdf.py)
+# Learning rate schedules for decoder vs latent parameter groups
 # ---------------------------------------------------------------------------
 
 
@@ -183,7 +183,7 @@ def train_epoch(
                 v = float(cfg['clamp_value'])
                 pred = torch.clamp(pred, -v, v)
 
-            chunk_loss, l1_part, reg_l2, reg_s = sdf_loss_corepp_chunk(
+            chunk_loss, l1_part, reg_l2, reg_s = sdf_autodecoder_loss_chunk(
                 pred,
                 sdf_chunks[ci],
                 batch_vecs,
