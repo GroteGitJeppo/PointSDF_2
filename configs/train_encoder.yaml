@@ -11,11 +11,11 @@ target_csv: data/3DPotatoTwin/ground_truth.csv
 # Directory of per-label latent codes produced by Stage 1.
 # Each file: <latent_dir>/<label>.pth  (single tensor of shape latent_size)
 # Set this to the latent_codes/ subfolder of the best Stage 1 run.
-latent_dir: weights/deepsdf/<run_tag>/latent_codes
+latent_dir: weights/deepsdf/02_04_173354/latent_codes
 
 # ---- Stage 1 decoder (frozen) ------------------------------
 # Path to the decoder.pth saved by Stage 1
-decoder_weights: weights/deepsdf/<run_tag>/decoder.pth
+decoder_weights: weights/deepsdf/02_04_173354/decoder.pth
 # Path to the Stage 1 config (used to read architecture params)
 decoder_config:  configs/train_deepsdf.yaml
 
@@ -24,7 +24,7 @@ output_dir: weights/encoder
 
 # ---- Encoder training --------------------------------------
 seed:              133
-epochs:            100
+epochs:            500
 batch_size:        16
 num_points:        1024
 lr:                0.001
