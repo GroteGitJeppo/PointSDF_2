@@ -1,6 +1,7 @@
 """Shared utilities for PointSDF_2."""
 
 import torch
+import torch.nn.functional as F
 import torch.utils.dlpack
 import open3d as o3d
 import open3d.core as o3c
@@ -115,3 +116,39 @@ def sdf_loss(
     l1 = torch.mean(torch.abs(pred_sdf - target_sdf))
     l2 = sigma ** 2 * torch.mean(torch.linalg.norm(latent, dim=1, ord=2))
     return l1 + l2, l1, l2
+
+
+def sdf_loss_corepp_chunk(
+    pred_sdf: torch.Tensor,
+    target_sdf: torch.Tensor,
+    latent_vecs: torch.Tensor,
+    num_sdf_samples_scene: int,
+    epoch_1based: int,
+    code_reg_lambda: float,
+    reg_ramp_epochs: int,
+    do_code_regularization: bool,
+    do_code_regularization_sphere: bool,
+):
+    """
+    One backward chunk matching corepp train_deep_sdf: L1 sum / num_scene_samples
+    plus optional ramped latent regularisers (same denominator).
+    """
+    loss_l1 = F.l1_loss(pred_sdf, target_sdf, reduction='sum') / num_sdf_samples_scene
+    chunk_loss = loss_l1
+    reg_l2 = torch.zeros((), device=pred_sdf.device, dtype=pred_sdf.dtype)
+    reg_sphere = torch.zeros((), device=pred_sdf.device, dtype=pred_sdf.dtype)
+    ramp = min(1.0, float(epoch_1based) / float(reg_ramp_epochs))
+
+    if do_code_regularization:
+        l2_size_loss = torch.sum(torch.norm(latent_vecs, dim=1))
+        reg = code_reg_lambda * ramp * l2_size_loss / num_sdf_samples_scene
+        chunk_loss = chunk_loss + reg
+        reg_l2 = reg.detach()
+
+    if do_code_regularization_sphere:
+        sphere_loss = torch.abs(1.0 - torch.norm(latent_vecs, dim=1)).sum()
+        reg = code_reg_lambda * ramp * sphere_loss / num_sdf_samples_scene
+        chunk_loss = chunk_loss + reg
+        reg_sphere = reg.detach()
+
+    return chunk_loss, loss_l1.detach(), reg_l2, reg_sphere

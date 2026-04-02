@@ -1,21 +1,25 @@
 # ============================================================
-# Stage 1 config: DeepSDF autodecoder training
-# Update the paths below to match your server layout.
+# Stage 1 config: DeepSDF autodecoder (corepp-style training)
+# Update paths to match your server layout.
 # ============================================================
 
-# ---- Data (server paths) -----------------------------------
-# Root with one sub-folder per potato label. samples.npz is resolved as:
-#   <sdf_data_dir>/<label>/laser/samples.npz   (corepp) — tried first
-#   <sdf_data_dir>/<label>/samples.npz         (flat)    — fallback
-# Arrays: 'pos' / 'neg' each (N, 4) [x, y, z, sdf]
+# ---- Data --------------------------------------------------
+# samples.npz: <sdf_data_dir>/<label>/laser/samples.npz or .../<label>/samples.npz
 sdf_data_dir: data/3DPotatoTwin/sdfsamples/potato
 splits_csv:   data/3DPotatoTwin/splits.csv
+
+# Labels from these splits get Stage 1 latents (test excluded for holdout).
+stage1_splits: [train, val]
+
+# Random SDF points drawn per shape per optimiser step (corepp SamplesPerScene).
+samples_per_scene: 16384
+# Split one shape's samples into this many chunks before one backward (memory).
+batch_split: 1
 
 # ---- Output ------------------------------------------------
 output_dir: weights/deepsdf
 
-# ---- Architecture ------------------------------------------
-# These values MUST match when loading the decoder in Stage 2.
+# ---- Architecture (must match Stage 2 decoder_config) -----
 latent_size:       64
 num_layers:        8
 inner_dim:         256
@@ -24,19 +28,38 @@ skip_connections:  true
 # ---- Training ----------------------------------------------
 seed:              42
 epochs:            500
-batch_size:        8192   # large batches work well for SDF point samples
-lr_model:          0.0001
-lr_latent:         0.001
-sigma_regulariser: 0.01   # weight of the L2 latent regulariser
 loss_multiplier:   1.0
 clamp:             true
-clamp_value:       0.1    # clamp SDF predictions to [-0.1, 0.1]
+clamp_value:       0.1
 
-# ---- LR scheduling -----------------------------------------
-lr_scheduler:  true
-lr_multiplier: 0.9        # ReduceLROnPlateau factor
-patience:      20         # epochs without improvement before reducing LR
+# corepp-style latent regularisation (ramped over reg_ramp_epochs)
+code_regularization:         true
+code_regularization_sphere:  false
+code_regularization_lambda:  0.0001
+reg_ramp_epochs:             100
 
-# ---- Resume from checkpoint --------------------------------
+# nn.Embedding init: N(0, code_init_std_dev / sqrt(latent_size))
+code_init_std_dev: 1.0
+# If set, Embedding max_norm (L2); omit or null for no bound
+code_bound: null
+
+# Optional gradient clip (L2 norm); null to disable
+gradient_clip_norm: null
+
+# ---- Learning rates (two entries: decoder, then latents) ---
+# Types: Constant | Step | Warmup  (same semantics as corepp train_deep_sdf)
+learning_rate_schedule:
+  - Type: Constant
+    Value: 0.0001
+  - Type: Constant
+    Value: 0.001
+
+# ---- Checkpoints -------------------------------------------
+# Save full run under snapshots/<epoch>/ every N epochs (0 = disable)
+snapshot_frequency: 50
+# Overwrite latest/ every N epochs for resume (0 = disable)
+log_frequency:      10
+
+# ---- Resume ------------------------------------------------
 pretrained:   false
-pretrain_dir: ''          # path to a previous output_dir/<run_tag>/ folder
+pretrain_dir: ''   # folder containing decoder.pth, latent_embedding.pt, optimizer.pt, meta.pt
