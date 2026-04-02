@@ -1,12 +1,10 @@
 """
 Per-shape SDF sample dataset for Stage 1 (train_deepsdf.py).
 
-One __getitem__ per potato: loads samples.npz from disk and returns a random
-subsample of `samples_per_scene` points (half positive / half negative SDF
-samples), same subsampling idea as classic DeepSDF data loaders.
+All samples.npz files for the split are loaded into RAM at init (no disk read
+per epoch). Each __getitem__ returns a random subsample of `samples_per_scene`
+points (half positive / half negative SDF samples).
 """
-
-import os
 
 import numpy as np
 import pandas as pd
@@ -46,13 +44,12 @@ class SDFSceneDataset(Dataset):
         else:
             labels = set(splits_df[splits_df['split'] == split]['label'].astype(str))
 
-        self.sdf_data_dir = sdf_data_dir
         self.samples_per_scene = samples_per_scene
         self.clamp_value = clamp_value
 
         self.labels: list[str] = []
-        self.npz_paths: list[str] = []
         self.label_to_idx: dict[str, int] = {}
+        self._ram_pos_neg: list[tuple[torch.Tensor, torch.Tensor]] = []
 
         for label in sorted(labels):
             path = resolve_samples_npz(sdf_data_dir, label)
@@ -61,7 +58,17 @@ class SDFSceneDataset(Dataset):
             idx = len(self.labels)
             self.label_to_idx[label] = idx
             self.labels.append(label)
-            self.npz_paths.append(path)
+
+            data = np.load(path)
+            pos = torch.from_numpy(np.asarray(data['pos'], dtype=np.float32))
+            neg = torch.from_numpy(np.asarray(data['neg'], dtype=np.float32))
+            pos = _remove_nans(pos)
+            neg = _remove_nans(neg)
+            if pos.shape[0] > 0:
+                pos = pos[torch.randperm(pos.shape[0])]
+            if neg.shape[0] > 0:
+                neg = neg[torch.randperm(neg.shape[0])]
+            self._ram_pos_neg.append((pos, neg))
 
         if not self.labels:
             raise RuntimeError(
@@ -70,9 +77,18 @@ class SDFSceneDataset(Dataset):
         if samples_per_scene < 2:
             raise ValueError('samples_per_scene must be at least 2 (pos/neg halves).')
 
+        total_floats = sum(
+            p.numel() + n.numel() for p, n in self._ram_pos_neg
+        )
+        approx_gib = total_floats * 4 / (1024 ** 3)
+
         print(
             f'SDFSceneDataset [{split}]: {len(self.labels)} shapes, '
             f'{samples_per_scene} samples/scene per step'
+        )
+        print(
+            f'SDFSceneDataset: loaded all samples.npz into RAM '
+            f'(~{approx_gib:.2f} GiB float32, {total_floats:,} values).'
         )
 
     def __len__(self) -> int:
@@ -82,11 +98,8 @@ class SDFSceneDataset(Dataset):
         subsample = self.samples_per_scene
         half = int(subsample / 2)
 
-        pos_tensor = _remove_nans(pos_tensor)
-        neg_tensor = _remove_nans(neg_tensor)
-
         if pos_tensor.shape[0] == 0 or neg_tensor.shape[0] == 0:
-            raise RuntimeError('pos or neg has no valid samples after NaN removal')
+            raise RuntimeError('pos or neg has no valid samples (empty after init load)')
 
         if pos_tensor.shape[0] < half:
             random_pos = (torch.rand(half) * pos_tensor.shape[0]).long()
@@ -120,9 +133,7 @@ class SDFSceneDataset(Dataset):
         return samples.float()
 
     def __getitem__(self, idx: int) -> dict:
-        data = np.load(self.npz_paths[idx])
-        pos_tensor = torch.from_numpy(np.asarray(data['pos'], dtype=np.float32))
-        neg_tensor = torch.from_numpy(np.asarray(data['neg'], dtype=np.float32))
+        pos_tensor, neg_tensor = self._ram_pos_neg[idx]
         sdf_data = self._unpack_subsample(pos_tensor, neg_tensor)
         return {
             'sdf_data': sdf_data,
