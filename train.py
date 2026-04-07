@@ -58,7 +58,7 @@ def train_epoch(encoder, optimizer, loader, sigma, device):
         pred_latent = encoder(batch)  # (B, latent_size)
 
         mse = F.mse_loss(pred_latent, latent_gt.detach())
-        reg = sigma ** 2 * pred_latent.norm(dim=1).mean()
+        reg = sigma ** 2 * pred_latent.pow(2).sum(dim=1).mean()
         loss = mse + reg
 
         optimizer.zero_grad()
@@ -85,7 +85,7 @@ def val_epoch(encoder, loader, sigma, device):
         pred_latent = encoder(batch)
 
         mse = F.mse_loss(pred_latent, latent_gt)
-        reg = sigma ** 2 * pred_latent.norm(dim=1).mean()
+        reg = sigma ** 2 * pred_latent.pow(2).sum(dim=1).mean()
         loss = mse + reg
 
         total_loss += loss.item()

@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from torch_geometric.nn import MLP, PointNetConv, fps, global_max_pool, radius
 
 
@@ -47,7 +48,17 @@ class PointNetEncoder(torch.nn.Module):
         self.sa1_module = SAModule(0.5, 0.2, MLP([3, 64, 64, 128]))
         self.sa2_module = SAModule(0.25, 0.4, MLP([128 + 3, 128, 128, 256]))
         self.sa3_module = GlobalSAModule(MLP([256 + 3, 256, 512, 1024]))
-        self.latent_head = MLP([1024, 512, 256, latent_size], dropout=0.5, norm=None)
+        self.latent_head = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.4),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(0.4),
+            nn.Linear(256, latent_size),
+        )
 
     def forward(self, data):
         """
