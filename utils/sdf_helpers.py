@@ -95,29 +95,6 @@ def _clean_mesh(mesh):
 # Loss
 # ---------------------------------------------------------------------------
 
-def sdf_loss(
-    pred_sdf: torch.Tensor,
-    target_sdf: torch.Tensor,
-    latent: torch.Tensor,
-    sigma: float = 0.01,
-):
-    """
-    DeepSDF loss: L1 reconstruction + L2 latent regulariser.
-
-    Args:
-        pred_sdf:   (N, 1) predicted SDF values
-        target_sdf: (N, 1) ground-truth SDF values
-        latent:     (N, latent_size) latent codes for each sample in the batch
-        sigma:      regularisation weight
-
-    Returns:
-        (total_loss, l1_loss, l2_loss)
-    """
-    l1 = torch.mean(torch.abs(pred_sdf - target_sdf))
-    l2 = sigma ** 2 * torch.mean(torch.linalg.norm(latent, dim=1, ord=2))
-    return l1 + l2, l1, l2
-
-
 def sdf_autodecoder_loss_chunk(
     pred_sdf: torch.Tensor,
     target_sdf: torch.Tensor,

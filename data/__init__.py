@@ -1,3 +1,3 @@
-from .pointcloud import PointCloudDataset
+from .encoder_dataset import PointCloudLatentDataset
 
-__all__ = ['PointCloudDataset']
+__all__ = ['PointCloudLatentDataset']
