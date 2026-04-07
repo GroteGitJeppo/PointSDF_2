@@ -153,3 +153,26 @@ def sdf_autodecoder_loss_chunk(
         reg_sphere = reg.detach()
 
     return chunk_loss, loss_l1.detach(), reg_l2, reg_sphere
+
+
+# ---------------------------------------------------------------------------
+# Chamfer distance
+# ---------------------------------------------------------------------------
+
+def chamfer_distance(pred_pts: torch.Tensor, gt_pts: torch.Tensor) -> float:
+    """
+    Symmetric Chamfer distance (L1) between two point sets.
+
+    CD(A, B) = mean_a( min_b ||a - b|| ) + mean_b( min_a ||a - b|| )
+
+    Both tensors must be on the same device.
+
+    Args:
+        pred_pts: (M, 3) predicted surface point cloud
+        gt_pts:   (N, 3) ground-truth surface point cloud
+    Returns:
+        Scalar Chamfer distance (same units as the point coordinates).
+    """
+    dists = torch.cdist(pred_pts, gt_pts)            # (M, N)
+    cd = dists.min(dim=1).values.mean() + dists.min(dim=0).values.mean()
+    return cd.item()

@@ -47,9 +47,9 @@ if not WITH_TORCH_CLUSTER:
 # Training / validation steps
 # ---------------------------------------------------------------------------
 
-def train_epoch(encoder, optimizer, loader, sigma, device):
+def train_epoch(encoder, decoder, optimizer, loader, sigma, sdf_loss_weight, device):
     encoder.train()
-    total_loss = total_mse = total_reg = 0.0
+    total_loss = total_mse = total_reg = total_sdf = 0.0
 
     for batch in loader:
         batch = batch.to(device)
@@ -61,6 +61,22 @@ def train_epoch(encoder, optimizer, loader, sigma, device):
         reg = sigma ** 2 * pred_latent.pow(2).sum(dim=1).mean()
         loss = mse + reg
 
+        # End-to-end SDF loss: run predicted latent through the frozen decoder
+        # on the GT SDF query points, supervise with GT SDF values.
+        # Gradients flow through the decoder input (latent) back to the encoder;
+        # decoder weights are frozen so they do not update.
+        sdf_l = torch.tensor(0.0, device=device)
+        if sdf_loss_weight > 0.0 and batch.sdf_xyz is not None:
+            sdf_xyz = batch.sdf_xyz              # (B, N_sdf, 3)
+            sdf_gt_b = batch.sdf_gt              # (B, N_sdf, 1)
+            B = pred_latent.size(0)
+            N_sdf = sdf_xyz.size(1)
+            lat_tiled = pred_latent.unsqueeze(1).expand(-1, N_sdf, -1).reshape(B * N_sdf, -1)
+            xyz_flat = sdf_xyz.reshape(B * N_sdf, 3)
+            pred_sdf = decoder(torch.cat([lat_tiled, xyz_flat], dim=1))  # (B*N_sdf, 1)
+            sdf_l = F.l1_loss(pred_sdf, sdf_gt_b.reshape(B * N_sdf, 1))
+            loss = loss + sdf_loss_weight * sdf_l
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -68,15 +84,16 @@ def train_epoch(encoder, optimizer, loader, sigma, device):
         total_loss += loss.item()
         total_mse += mse.item()
         total_reg += reg.item()
+        total_sdf += sdf_l.item()
 
     n = len(loader)
-    return total_loss / n, total_mse / n, total_reg / n
+    return total_loss / n, total_mse / n, total_reg / n, total_sdf / n
 
 
 @torch.no_grad()
-def val_epoch(encoder, loader, sigma, device):
+def val_epoch(encoder, decoder, loader, sigma, sdf_loss_weight, device):
     encoder.eval()
-    total_loss = total_mse = total_reg = 0.0
+    total_loss = total_mse = total_reg = total_sdf = 0.0
 
     for batch in loader:
         batch = batch.to(device)
@@ -88,12 +105,25 @@ def val_epoch(encoder, loader, sigma, device):
         reg = sigma ** 2 * pred_latent.pow(2).sum(dim=1).mean()
         loss = mse + reg
 
+        sdf_l = torch.tensor(0.0, device=device)
+        if sdf_loss_weight > 0.0 and batch.sdf_xyz is not None:
+            sdf_xyz = batch.sdf_xyz
+            sdf_gt_b = batch.sdf_gt
+            B = pred_latent.size(0)
+            N_sdf = sdf_xyz.size(1)
+            lat_tiled = pred_latent.unsqueeze(1).expand(-1, N_sdf, -1).reshape(B * N_sdf, -1)
+            xyz_flat = sdf_xyz.reshape(B * N_sdf, 3)
+            pred_sdf = decoder(torch.cat([lat_tiled, xyz_flat], dim=1))
+            sdf_l = F.l1_loss(pred_sdf, sdf_gt_b.reshape(B * N_sdf, 1))
+            loss = loss + sdf_loss_weight * sdf_l
+
         total_loss += loss.item()
         total_mse += mse.item()
         total_reg += reg.item()
+        total_sdf += sdf_l.item()
 
     n = len(loader)
-    return total_loss / n, total_mse / n, total_reg / n
+    return total_loss / n, total_mse / n, total_reg / n, total_sdf / n
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +164,10 @@ def main(cfg: dict):
     print(f'Loaded frozen decoder from {cfg["decoder_weights"]}')
 
     # ----- Datasets -----
+    sdf_data_dir = cfg.get('sdf_data_dir', None)
+    sdf_samples = int(cfg.get('sdf_samples_per_shape', 1024))
+    sdf_clamp = cfg.get('sdf_clamp_value', None)
+
     train_ds = PointCloudLatentDataset(
         data_root=cfg['data_root'],
         splits_csv=cfg['splits_csv'],
@@ -141,6 +175,9 @@ def main(cfg: dict):
         split='train',
         num_points=cfg.get('num_points', 1024),
         apply_augmentation=True,
+        sdf_data_dir=sdf_data_dir,
+        sdf_samples_per_shape=sdf_samples,
+        sdf_clamp_value=sdf_clamp,
     )
     val_ds = PointCloudLatentDataset(
         data_root=cfg['data_root'],
@@ -149,6 +186,9 @@ def main(cfg: dict):
         split='val',
         num_points=cfg.get('num_points', 1024),
         apply_augmentation=False,
+        sdf_data_dir=sdf_data_dir,
+        sdf_samples_per_shape=sdf_samples,
+        sdf_clamp_value=sdf_clamp,
     )
 
     train_loader = DataLoader(
@@ -171,20 +211,29 @@ def main(cfg: dict):
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=cfg.get('lr_gamma', 0.97))
 
     sigma = cfg.get('sigma_regulariser', 0.01)
+    sdf_loss_weight = float(cfg.get('sdf_loss_weight', 0.0))
+    if sdf_loss_weight > 0.0 and sdf_data_dir is None:
+        print('WARNING: sdf_loss_weight > 0 but sdf_data_dir is not set — SDF loss disabled.')
+        sdf_loss_weight = 0.0
 
     # ----- Training loop -----
     best_val_loss = float('inf')
     for epoch in range(1, cfg.get('epochs', 100) + 1):
         t0 = time.time()
-        train_loss, train_mse, train_reg = train_epoch(encoder, optimizer, train_loader, sigma, device)
-        val_loss, val_mse, val_reg = val_epoch(encoder, val_loader, sigma, device)
+        train_loss, train_mse, train_reg, train_sdf = train_epoch(
+            encoder, decoder, optimizer, train_loader, sigma, sdf_loss_weight, device,
+        )
+        val_loss, val_mse, val_reg, val_sdf = val_epoch(
+            encoder, decoder, val_loader, sigma, sdf_loss_weight, device,
+        )
         elapsed = time.time() - t0
 
+        sdf_str = f' sdf={train_sdf:.5f}|{val_sdf:.5f}' if sdf_loss_weight > 0.0 else ''
         print(
             f'Epoch {epoch:03d}/{cfg.get("epochs", 100)} | '
             f'train {train_loss:.5f} (mse={train_mse:.5f}) | '
-            f'val {val_loss:.5f} (mse={val_mse:.5f}) | '
-            f'{elapsed:.1f}s'
+            f'val {val_loss:.5f} (mse={val_mse:.5f}) |'
+            f'{sdf_str} {elapsed:.1f}s'
         )
 
         writer.add_scalar('Loss/train', train_loss, epoch)
@@ -192,6 +241,9 @@ def main(cfg: dict):
         writer.add_scalar('Loss/val', val_loss, epoch)
         writer.add_scalar('Loss/val_mse', val_mse, epoch)
         writer.add_scalar('LR', scheduler.get_last_lr()[0], epoch)
+        if sdf_loss_weight > 0.0:
+            writer.add_scalar('Loss/train_sdf', train_sdf, epoch)
+            writer.add_scalar('Loss/val_sdf', val_sdf, epoch)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss

@@ -27,8 +27,9 @@ from torch_geometric.data import Data
 from torch_geometric.typing import WITH_TORCH_CLUSTER
 from tqdm import tqdm
 
+from data.sdf_samples import resolve_samples_npz
 from models import PointNetEncoder, SDFDecoder
-from utils import get_volume_coords, sdf2mesh
+from utils import chamfer_distance, get_volume_coords, sdf2mesh
 
 warnings.filterwarnings('ignore')
 
@@ -91,11 +92,21 @@ def main(cfg: dict, checkpoint_path: str):
     # Pre-compute grid coords (shared across all test samples)
     grid_coords = get_volume_coords(resolution=grid_resolution, bbox=grid_bbox).to(device)
 
+    # Chamfer distance — requires SDF samples from Stage 1 as GT surface proxy.
+    # Uses sdf_data_dir from the decoder config (train_deepsdf.yaml) if available.
+    sdf_data_dir = decoder_cfg.get('sdf_data_dir', None)
+    compute_chamfer = sdf_data_dir is not None
+    if compute_chamfer:
+        print(f'Chamfer distance enabled (GT from {sdf_data_dir})')
+    else:
+        print('Chamfer distance disabled (set sdf_data_dir in decoder config to enable)')
+
     # ----- Output columns -----
     columns = ['file_name', 'unique_id', 'cultivar', 'growing_season',
-               'gt_volume_ml', 'pred_volume_ml', 'exec_time_ms']
+               'gt_volume_ml', 'pred_volume_ml', 'chamfer_dist', 'exec_time_ms']
     rows = []
     exec_times = []
+    chamfer_values = []
 
     with torch.no_grad():
         for ply_file in tqdm(ply_files, desc='Testing'):
@@ -116,12 +127,38 @@ def main(cfg: dict, checkpoint_path: str):
             pred_sdf = decoder(decoder_input)               # (N, 1)
 
             pred_volume = float('nan')
+            cd_value = float('nan')
+            mesh = None
             try:
                 mesh = sdf2mesh(pred_sdf, grid_coords)
                 if mesh.is_watertight():
                     pred_volume = round(mesh.get_volume() * 1e6, 2)  # m³ → mL
             except (ValueError, RuntimeError) as e:
                 print(f'  Mesh extraction failed for {unique_id}: {e}')
+
+            # Chamfer distance: sample predicted mesh surface vs GT SDF near-surface points
+            if compute_chamfer and mesh is not None and mesh.is_watertight():
+                try:
+                    npz_path = resolve_samples_npz(sdf_data_dir, unique_id)
+                    if npz_path is not None:
+                        raw = np.load(npz_path)
+                        gt_pts_np = np.concatenate(
+                            [raw['pos'][:, :3], raw['neg'][:, :3]], axis=0
+                        ).astype(np.float32)
+                        if len(gt_pts_np) > 2048:
+                            idx = np.random.choice(len(gt_pts_np), 2048, replace=False)
+                            gt_pts_np = gt_pts_np[idx]
+                        gt_pts = torch.from_numpy(gt_pts_np).to(device)
+
+                        pred_pcd = mesh.sample_points_uniformly(number_of_points=2048)
+                        pred_pts = torch.from_numpy(
+                            np.asarray(pred_pcd.points, dtype=np.float32)
+                        ).to(device)
+
+                        cd_value = chamfer_distance(pred_pts, gt_pts)
+                        chamfer_values.append(cd_value)
+                except Exception as e:
+                    print(f'  Chamfer failed for {unique_id}: {e}')
 
             elapsed_ms = (timeit.default_timer() - t0) * 1e3
             exec_times.append(elapsed_ms)
@@ -136,6 +173,7 @@ def main(cfg: dict, checkpoint_path: str):
                 'growing_season': season,
                 'gt_volume_ml': gt_volume,
                 'pred_volume_ml': pred_volume,
+                'chamfer_dist': cd_value,
                 'exec_time_ms': round(elapsed_ms, 2),
             })
 
@@ -149,7 +187,15 @@ def main(cfg: dict, checkpoint_path: str):
     print(f'  MAE volume:  {mean_absolute_error(gt_arr, pred_arr):.2f} mL')
     print(f'  RMSE volume: {root_mean_squared_error(gt_arr, pred_arr):.2f} mL')
     print(f'  R²:          {r2_score(gt_arr, pred_arr):.3f}')
+    if chamfer_values:
+        print(f'  Chamfer dist:{np.mean(chamfer_values) * 1000:.3f} mm (n={len(chamfer_values)})')
     print(f'  Avg exec:    {np.mean(exec_times):.1f} ms')
+
+    def _cd_str(sel):
+        cd_vals = sel['chamfer_dist'].dropna()
+        if len(cd_vals) == 0:
+            return ''
+        return f' | CD={cd_vals.mean() * 1000:.3f} mm'
 
     # Per-cultivar breakdown
     if 'cultivar' in df_out.columns and df_out['cultivar'].notna().any():
@@ -160,6 +206,7 @@ def main(cfg: dict, checkpoint_path: str):
                 f'  {cultivar}: n={len(sel)} | '
                 f'MAE={mean_absolute_error(sel["gt_volume_ml"], sel["pred_volume_ml"]):.2f} mL | '
                 f'R²={r2_score(sel["gt_volume_ml"], sel["pred_volume_ml"]):.3f}'
+                f'{_cd_str(sel)}'
             )
 
     # Per-season breakdown
@@ -171,6 +218,7 @@ def main(cfg: dict, checkpoint_path: str):
                 f'  {season}: n={len(sel)} | '
                 f'MAE={mean_absolute_error(sel["gt_volume_ml"], sel["pred_volume_ml"]):.2f} mL | '
                 f'R²={r2_score(sel["gt_volume_ml"], sel["pred_volume_ml"]):.3f}'
+                f'{_cd_str(sel)}'
             )
 
     results_path = os.path.join(

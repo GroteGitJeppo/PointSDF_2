@@ -4,4 +4,5 @@ from .sdf_helpers import (
     sdf2mesh,
     sdf_loss,
     sdf_autodecoder_loss_chunk,
+    chamfer_distance,
 )
