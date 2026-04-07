@@ -61,12 +61,10 @@ class PointCloudLatentDataset(Dataset):
         if apply_augmentation:
             self.transform = T.Compose([
                 T.RandomJitter(0.0005),
-                T.RandomRotate(2, axis=0),
-                T.RandomRotate(2, axis=1),
-                T.RandomRotate(2, axis=2),
-                T.RandomFlip(axis=0, p=0.5),
-                T.RandomFlip(axis=1, p=0.5),
-                T.RandomShear(0.2),
+                T.RandomRotate(2, axis=0),    # small tilt (realistic)
+                T.RandomRotate(2, axis=1),    # small tilt (realistic)
+                T.RandomRotate(90, axis=2),   # full yaw — unconstrained on conveyor belt
+                T.RandomFlip(axis=0, p=0.5),  # left-right flip — physically plausible
             ])
         else:
             self.transform = None
