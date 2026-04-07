@@ -58,7 +58,7 @@ learning_rate_schedule:
 
 # ---- Checkpoints -------------------------------------------
 # Save full run under snapshots/<epoch>/ every N epochs (0 = disable)
-snapshot_frequency: 50
+snapshot_frequency: 10
 # Overwrite latest/ every N epochs for resume (0 = disable)
 log_frequency:      10
 

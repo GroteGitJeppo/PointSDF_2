@@ -217,6 +217,10 @@ def main(cfg: dict):
         sdf_loss_weight = 0.0
 
     # ----- Training loop -----
+    snapshot_freq = int(cfg.get('snapshot_frequency', 10))
+    snapshots_dir = os.path.join(output_dir, 'snapshots')
+    os.makedirs(snapshots_dir, exist_ok=True)
+
     best_val_loss = float('inf')
     for epoch in range(1, cfg.get('epochs', 100) + 1):
         t0 = time.time()
@@ -256,6 +260,19 @@ def main(cfg: dict):
                 'val_loss': val_loss,
             }, os.path.join(output_dir, 'checkpoint.pth'))
             print(f'  Saved best model (val {best_val_loss:.5f})')
+
+        # Periodic snapshots — run test.py on these after training to pick
+        # the checkpoint with the best volume RMSE (paper's key selection criterion).
+        if snapshot_freq > 0 and epoch % snapshot_freq == 0:
+            snap_dir = os.path.join(snapshots_dir, f'{epoch:04d}')
+            os.makedirs(snap_dir, exist_ok=True)
+            torch.save({
+                'epoch': epoch,
+                'encoder_state_dict': encoder.state_dict(),
+                'decoder_state_dict': decoder.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': val_loss,
+            }, os.path.join(snap_dir, 'checkpoint.pth'))
 
         scheduler.step()
 

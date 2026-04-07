@@ -82,7 +82,17 @@ def main(cfg: dict, checkpoint_path: str):
     all_files = list(Path(cfg['data_root']).rglob('*.ply'))
     ply_files = [str(f) for f in all_files if f.parent.name in test_ids]
 
+    volume_col = cfg.get('volume_column', 'volume_ml')
     gt_df = pd.read_csv(cfg['target_csv'], delimiter=',').set_index('label')
+
+    # Merge optional metadata CSV (cultivar, growing_season) if provided and
+    # those columns are not already present in the primary target CSV.
+    metadata_csv = cfg.get('metadata_csv', None)
+    if metadata_csv:
+        meta_df = pd.read_csv(metadata_csv, delimiter=',').set_index('label')
+        for col in ('cultivar', 'growing_season'):
+            if col not in gt_df.columns and col in meta_df.columns:
+                gt_df = gt_df.join(meta_df[[col]], how='left')
 
     pre_transform = T.Center()
     num_points = cfg.get('num_points', 1024)
@@ -115,7 +125,7 @@ def main(cfg: dict, checkpoint_path: str):
             if unique_id not in gt_df.index:
                 continue
 
-            gt_volume = float(gt_df.loc[unique_id, 'volume_ml'])
+            gt_volume = float(gt_df.loc[unique_id, volume_col])
 
             t0 = timeit.default_timer()
 

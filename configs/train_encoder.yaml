@@ -6,7 +6,9 @@
 # ---- Data (server paths) -----------------------------------
 data_root:  data/3DPotatoTwin/1_rgbd/2_pcd
 splits_csv: data/3DPotatoTwin/splits.csv
-target_csv: data/3DPotatoTwin/ground_truth.csv
+target_csv:    data/3DPotatoTwin/mesh_traits_2023.csv
+volume_column: "volume (cm3)"     # column in target_csv that holds ground-truth volume (cm³ = mL)
+metadata_csv:  data/3DPotatoTwin/ground_truth.csv   # optional: provides cultivar / growing_season columns
 
 # Directory of per-label latent codes produced by Stage 1.
 # Each file: <latent_dir>/<label>.pth  (single tensor of shape latent_size)
@@ -27,10 +29,11 @@ seed:              133
 epochs:            500
 batch_size:        16
 num_points:        1024
-lr:                0.001
+lr:                0.0001
 weight_decay:      0.000001
 lr_gamma:          0.995     # ExponentialLR gamma per epoch (0.995^500 ≈ 0.082 — stays usable)
 sigma_regulariser: 0.01      # weight of the latent L2 regulariser
+snapshot_frequency: 10       # save a checkpoint every N epochs for post-hoc volume-RMSE selection
 
 # ---- End-to-end SDF loss (Stage 2) -------------------------
 # Set sdf_data_dir to the same path used in Stage 1 to enable an additional
