@@ -37,10 +37,10 @@ sigma_regulariser: 0.01      # weight of the latent L2 regulariser
 # L1 SDF loss through the frozen decoder.  Leave empty / commented out to
 # train with latent MSE only (original behaviour).
 #
-# sdf_data_dir:           data/3DPotatoTwin/sdfsamples/potato
-# sdf_samples_per_shape:  1024   # SDF points sampled per shape per batch step
-# sdf_clamp_value:        0.1    # match Stage 1 clamp_value
-# sdf_loss_weight:        0.1    # weight of the SDF L1 loss relative to latent MSE
+sdf_data_dir:           data/3DPotatoTwin/sdfsamples/potato
+sdf_samples_per_shape:  1024   # SDF points sampled per shape per batch step
+sdf_clamp_value:        0.1    # match Stage 1 clamp_value
+sdf_loss_weight:        0.1    # weight of the SDF L1 loss relative to latent MSE
 
 # ---- Inference / test settings -----------------------------
 grid_resolution: 64          # resolution^3 SDF query points per sample
