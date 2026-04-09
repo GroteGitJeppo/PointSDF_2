@@ -39,7 +39,7 @@ class PointNetEncoder(torch.nn.Module):
     Reduced-capacity architecture to prevent overfitting on simple convex geometries.
     """
 
-    def __init__(self, latent_size: int = 64):
+    def __init__(self, latent_size: int = 32):
         super().__init__()
         self.latent_size = latent_size
         self.sa1_module = SAModule(ratio=0.25, r=0.2, nn=MLP([3, 32, 32, 64], norm="batch_norm"))

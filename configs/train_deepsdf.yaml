@@ -20,14 +20,14 @@ batch_split: 1
 output_dir: weights/deepsdf
 
 # ---- Architecture (must match Stage 2 decoder_config) -----
-latent_size:       64
+latent_size:       32
 num_layers:        8
 inner_dim:         256
 skip_connections:  true
 
 # ---- Training ----------------------------------------------
 seed:              42
-epochs:            500
+epochs:            5000
 # Per-epoch progress bar over shapes (tqdm); false = plain loop / quieter logs
 tqdm:              true
 loss_multiplier:   1.0
