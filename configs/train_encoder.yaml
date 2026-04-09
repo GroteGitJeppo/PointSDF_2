@@ -13,11 +13,11 @@ metadata_csv:  data/3DPotatoTwin/ground_truth.csv   # optional: provides cultiva
 # Directory of per-label latent codes produced by Stage 1.
 # Each file: <latent_dir>/<label>.pth  (single tensor of shape latent_size)
 # Set this to the latent_codes/ subfolder of the best Stage 1 run.
-latent_dir: weights/deepsdf/02_04_173354/latent_codes
+latent_dir: weights/deepsdf/09_04_210939/latent_codes_32_optimized
 
 # ---- Stage 1 decoder (frozen) ------------------------------
 # Path to the decoder.pth saved by Stage 1
-decoder_weights: weights/deepsdf/02_04_173354/decoder.pth
+decoder_weights: weights/deepsdf/09_04_210939/snapshots/0820/decoder.pth
 # Path to the Stage 1 config (used to read architecture params)
 decoder_config:  configs/train_deepsdf.yaml
 
