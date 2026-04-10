@@ -2,28 +2,40 @@
 """
 Test-time latent optimisation for PointSDF_2 — mirrors corepp/reconstruct_deep_sdf.py.
 
-Two main uses:
+Three main uses:
 
-1. Checkpoint selection (run on val split for every saved checkpoint):
+1. Sweep all checkpoints on the val split to find the best epoch E*
+   (replaces corepp/run_scripts_reconstruct.sh — loads SDF data into RAM only once):
+
        python reconstruct.py -c configs/train_deepsdf.yaml \\
-           --experiment_dir weights/deepsdf/09_04_210939 \\
+           --experiment_dir weights/deepsdf/<run> \\
+           --split val --all-checkpoints        # test every 10th epoch (corepp default)
+
+       python reconstruct.py -c configs/train_deepsdf.yaml \\
+           --experiment_dir weights/deepsdf/<run> \\
+           --split val --all-checkpoints 50     # test every 50th epoch (faster sweep)
+
+   Prints a sorted leaderboard and highlights the best checkpoint at the end.
+
+2. Evaluate a single checkpoint (with Chamfer, for spot-checks):
+
+       python reconstruct.py -c configs/train_deepsdf.yaml \\
+           --experiment_dir weights/deepsdf/<run> \\
            --checkpoint 500 --split val --chamfer
 
-   Prints Chamfer distance on the val set so you can pick the best epoch E*.
+3. Produce Stage 2 latent targets using the best checkpoint E*:
 
-2. Producing Stage 2 latent targets (run on train split with the best checkpoint):
        python reconstruct.py -c configs/train_deepsdf.yaml \\
-           --experiment_dir weights/deepsdf/09_04_210939 \\
+           --experiment_dir weights/deepsdf/<run> \\
            --checkpoint <E*> --split train
 
    Writes one <label>.pth per shape under
-       <experiment_dir>/Reconstructions/<epoch>/Codes/<split>/
+       <experiment_dir>/Reconstructions/<E*>/Codes/<split>/
    Point configs/train_encoder.yaml latent_dir at that folder.
 """
 
 import argparse
 import logging
-import math
 import os
 
 import numpy as np
@@ -84,7 +96,6 @@ def _empirical_stat(experiment_dir: str, checkpoint: str):
     if not os.path.isfile(lat_path):
         raise FileNotFoundError(f"Latent codes file not found: {lat_path}")
     data = torch.load(lat_path, map_location="cpu")
-    # state_dict format: {"weight": (N, latent_size)}
     weight = data["latent_codes"]["weight"]  # (N, L)
     mean = weight.mean(dim=0)
     std = weight.std(dim=0).clamp(min=1e-6)
@@ -111,31 +122,26 @@ def _optimise_latent(
     """
     Optimise a single latent code from SDF samples of one shape.
 
-    Returns the optimised latent (1, latent_size) on CPU.
+    Returns the optimised latent (latent_size,) on CPU.
     """
-    latent = torch.empty(1, latent_size).normal_(
-        mean=0.0, std=1.0
-    ).cuda()
-    # initialise from empirical distribution of training codes
+    latent = torch.empty(1, latent_size).normal_(mean=0.0, std=1.0).cuda()
     latent = emp_mean.unsqueeze(0) + emp_std.unsqueeze(0) * latent
     latent.requires_grad_(True)
 
     optimizer = torch.optim.Adam([latent], lr=lr)
     loss_fn = torch.nn.MSELoss(reduction="sum")
 
-    # LR step: halve at midpoint (mirrors corepp)
+    # LR halved at midpoint (mirrors corepp)
     decreased_by = 10
     adjust_lr_every = int(num_iterations / 2)
 
     all_samples = torch.cat([pos_tensor, neg_tensor], dim=0)  # (M, 4)
 
     for iteration in range(num_iterations):
-        # LR schedule
         current_lr = lr * ((1.0 / decreased_by) ** (iteration // adjust_lr_every))
         for pg in optimizer.param_groups:
             pg["lr"] = current_lr
 
-        # subsample
         idx = torch.randperm(all_samples.shape[0])[:num_samples]
         batch = all_samples[idx].cuda().float()
 
@@ -169,6 +175,138 @@ def _chamfer(pred_pts: torch.Tensor, gt_pts: torch.Tensor) -> float:
     return cd.item()
 
 
+def _chamfer_for_latent(
+    latent: torch.Tensor,
+    decoder: torch.nn.Module,
+    pos_t: torch.Tensor,
+    neg_t: torch.Tensor,
+    clamp_dist: float,
+) -> float | None:
+    """Compute Chamfer distance for a single shape given its optimised latent."""
+    all_pts = torch.cat([pos_t[:, :3], neg_t[:, :3]], dim=0)
+    if all_pts.shape[0] > 4096:
+        idx = torch.randperm(all_pts.shape[0])[:4096]
+        all_pts = all_pts[idx]
+    gt_pts = all_pts.cuda()
+
+    grid_res = 32
+    bbox = clamp_dist * 1.5
+    vals = torch.linspace(-bbox, bbox, grid_res)
+    g = torch.meshgrid(vals, vals, vals, indexing="ij")
+    grid = torch.stack([g_.ravel() for g_ in g], dim=1).cuda()
+
+    with torch.no_grad():
+        lat_exp = latent.cuda().unsqueeze(0).expand(grid.shape[0], -1)
+        net_in = torch.cat([lat_exp, grid], dim=1)
+        pred_sdf = decoder(net_in).squeeze(1)
+
+    surface_mask = pred_sdf.abs() < (bbox / grid_res * 2)
+    surface_pts = grid[surface_mask]
+    if surface_pts.shape[0] < 4:
+        return None
+    return _chamfer(surface_pts.float(), gt_pts.float())
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint discovery
+# ---------------------------------------------------------------------------
+
+def _discover_checkpoints(experiment_dir: str, step: int) -> list[int]:
+    """
+    Find all numeric checkpoint files in ModelParameters/, filter by step.
+
+    Only epochs divisible by `step` are returned — matching the stride logic
+    from corepp/run_scripts_reconstruct.sh (which used step=10).
+
+    Example: with step=50 and checkpoints [10,20,...,1000] on disk,
+    returns [50, 100, 150, ..., 1000].
+    """
+    folder = os.path.join(experiment_dir, MODEL_PARAMS_SUBDIR)
+    if not os.path.isdir(folder):
+        raise FileNotFoundError(f"ModelParameters/ not found in: {experiment_dir}")
+
+    epochs = []
+    for fname in os.listdir(folder):
+        if fname.endswith(".pth"):
+            stem = fname[:-4]
+            if stem.isdigit():
+                epoch = int(stem)
+                if epoch % step == 0:
+                    epochs.append(epoch)
+    return sorted(epochs)
+
+
+# ---------------------------------------------------------------------------
+# Per-checkpoint worker (shared between single-checkpoint and sweep modes)
+# ---------------------------------------------------------------------------
+
+def _run_checkpoint(
+    checkpoint: str,
+    experiment_dir: str,
+    cfg: dict,
+    labels: list[str],
+    ram: dict,
+    args,
+    compute_chamfer: bool,
+) -> float | None:
+    """
+    Run reconstruction for one checkpoint. Returns mean Chamfer (m) or None.
+
+    Loads the decoder and latent stats fresh for this checkpoint, then
+    optimises a latent per shape and optionally computes Chamfer distance.
+    Latents are saved to disk; existing files are re-used when --skip is set.
+    """
+    latent_size = int(cfg["latent_size"])
+    clamp_dist = float(cfg.get("clamp_value", cfg.get("clamping_distance", 0.1)))
+
+    try:
+        decoder = _load_decoder(experiment_dir, checkpoint, cfg)
+        emp_mean, emp_std = _empirical_stat(experiment_dir, checkpoint)
+    except FileNotFoundError as exc:
+        logging.warning("Skipping checkpoint %s: %s", checkpoint, exc)
+        return None
+
+    output_root = args.output_dir or experiment_dir
+    codes_dir = os.path.join(
+        output_root, RECONSTRUCTIONS_SUBDIR, checkpoint, CODES_SUBDIR, args.split
+    )
+    os.makedirs(codes_dir, exist_ok=True)
+
+    chamfer_vals = []
+
+    for label in tqdm(labels, desc=f"  epoch {checkpoint}", leave=False):
+        out_path = os.path.join(codes_dir, f"{label}.pth")
+
+        if args.skip and os.path.isfile(out_path):
+            latent = torch.load(out_path, map_location="cpu", weights_only=True)
+        else:
+            pos_t, neg_t = ram[label]
+            latent = _optimise_latent(
+                decoder=decoder,
+                pos_tensor=pos_t,
+                neg_tensor=neg_t,
+                latent_size=latent_size,
+                emp_mean=emp_mean,
+                emp_std=emp_std,
+                clamp_dist=clamp_dist,
+                num_iterations=args.iters,
+                num_samples=args.num_samples,
+                lr=args.lr,
+                l2reg=True,
+            )
+            torch.save(latent, out_path)
+
+        if compute_chamfer:
+            pos_t, neg_t = ram[label]
+            cd = _chamfer_for_latent(latent, decoder, pos_t, neg_t, clamp_dist)
+            if cd is not None:
+                chamfer_vals.append(cd)
+                logging.debug("    %s  CD=%.5f", label, cd)
+
+    mean_cd = float(np.mean(chamfer_vals)) if chamfer_vals else None
+    return mean_cd
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -182,25 +320,12 @@ def main(args):
     with open(args.decoder_config) as f:
         cfg = yaml.safe_load(f)
 
-    latent_size = int(cfg["latent_size"])
-    clamp_dist = float(cfg.get("clamp_value", cfg.get("clamping_distance", 0.1)))
-
-    # Resolve experiment_dir: if not given, fall back to cfg output_dir
     experiment_dir = args.experiment_dir
     if experiment_dir is None:
         experiment_dir = cfg["output_dir"]
         logging.info("--experiment_dir not set, using cfg output_dir: %s", experiment_dir)
 
-    decoder = _load_decoder(experiment_dir, args.checkpoint, cfg)
-    logging.info("Loaded decoder from checkpoint '%s'", args.checkpoint)
-
-    emp_mean, emp_std = _empirical_stat(experiment_dir, args.checkpoint)
-    logging.info(
-        "Empirical latent stats — mean norm: %.4f, std norm: %.4f",
-        emp_mean.norm().item(), emp_std.norm().item(),
-    )
-
-    # Resolve split labels from splits_csv
+    # Resolve labels and load all SDF data into RAM once (shared across checkpoints)
     splits_csv = args.splits_csv or cfg["splits_csv"]
     splits_df = pd.read_csv(splits_csv)
     requested = args.split.split(",")
@@ -209,9 +334,7 @@ def main(args):
     )
     if not labels:
         raise RuntimeError(f"No labels found for split={args.split!r} in {splits_csv}")
-    logging.info("Reconstructing %d shapes (split=%s)", len(labels), args.split)
 
-    # Load all SDF data into RAM
     sdf_data_dir = args.sdf_data_dir or cfg["sdf_data_dir"]
     ram: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     missing = []
@@ -227,76 +350,107 @@ def main(args):
     if missing:
         logging.warning("%d label(s) have no samples.npz: %s", len(missing), missing[:10])
     labels = [l for l in labels if l in ram]
+    logging.info("Loaded %d shapes (split=%s) into RAM", len(labels), args.split)
 
-    # Output directory
-    saved_epoch = args.checkpoint
+    # -----------------------------------------------------------------------
+    # SWEEP MODE  (--all-checkpoints <step>)
+    # -----------------------------------------------------------------------
+    if args.all_checkpoints is not None:
+        step = args.all_checkpoints
+        checkpoints = _discover_checkpoints(experiment_dir, step)
+
+        if not checkpoints:
+            raise RuntimeError(
+                f"No numeric checkpoints divisible by {step} found in "
+                f"{os.path.join(experiment_dir, MODEL_PARAMS_SUBDIR)}"
+            )
+
+        print(
+            f"\nSweeping {len(checkpoints)} checkpoint(s) on split={args.split!r} "
+            f"(step={step}, --skip is always on during sweep)\n"
+        )
+        args.skip = True  # reuse already-computed latents during sweep
+
+        results: list[tuple[int, float]] = []  # (epoch, mean_cd)
+
+        for epoch in checkpoints:
+            checkpoint_str = str(epoch)
+            print(f"[{epoch}/{checkpoints[-1]}] Reconstructing checkpoint {checkpoint_str} …")
+            mean_cd = _run_checkpoint(
+                checkpoint=checkpoint_str,
+                experiment_dir=experiment_dir,
+                cfg=cfg,
+                labels=labels,
+                ram=ram,
+                args=args,
+                compute_chamfer=True,
+            )
+            if mean_cd is not None:
+                results.append((epoch, mean_cd))
+                print(f"  → mean Chamfer = {mean_cd * 1000:.3f} mm")
+            else:
+                print(f"  → no valid Chamfer values (skipping in leaderboard)")
+
+        # Print sorted leaderboard
+        if results:
+            results_sorted = sorted(results, key=lambda x: x[1])
+            best_epoch, best_cd = results_sorted[0]
+
+            col_w = max(len(str(r[0])) for r in results_sorted)
+            header = f"{'epoch':>{col_w}}  |  Chamfer (mm)"
+            sep = "-" * (len(header) + 4)
+            print(f"\n{'=' * len(sep)}")
+            print(f"Checkpoint sweep results — split={args.split!r}, step={step}")
+            print(sep)
+            print(f"  {header}")
+            print(sep)
+            for epoch, cd in results_sorted:
+                marker = "  ← BEST" if epoch == best_epoch else ""
+                print(f"  {epoch:>{col_w}}  |  {cd * 1000:>8.3f}{marker}")
+            print(sep)
+            print(
+                f"\nBest checkpoint: epoch {best_epoch}  "
+                f"(Chamfer = {best_cd * 1000:.3f} mm)"
+            )
+            print(
+                f"\nNext steps — update configs/train_encoder.yaml:\n"
+                f"  decoder_weights: {os.path.join(experiment_dir, MODEL_PARAMS_SUBDIR, str(best_epoch))}.pth\n"
+                f"  latent_dir:      (run with --checkpoint {best_epoch} --split train to generate)"
+            )
+        else:
+            print("\nNo valid results — check that samples.npz files exist.")
+
+        return
+
+    # -----------------------------------------------------------------------
+    # SINGLE-CHECKPOINT MODE  (--checkpoint <name>)
+    # -----------------------------------------------------------------------
+    compute_chamfer = args.chamfer
+
+    print(f"\nReconstructing checkpoint '{args.checkpoint}' on split={args.split!r} …")
+    mean_cd = _run_checkpoint(
+        checkpoint=args.checkpoint,
+        experiment_dir=experiment_dir,
+        cfg=cfg,
+        labels=labels,
+        ram=ram,
+        args=args,
+        compute_chamfer=compute_chamfer,
+    )
+
+    if compute_chamfer:
+        if mean_cd is not None:
+            print(
+                f"\nCheckpoint {args.checkpoint} | split={args.split} | "
+                f"mean Chamfer = {mean_cd * 1000:.3f} mm  (n shapes={len(labels)})"
+            )
+        else:
+            print(f"\nCheckpoint {args.checkpoint} | split={args.split} | no valid Chamfer values")
+
     output_root = args.output_dir or experiment_dir
     codes_dir = os.path.join(
-        output_root, RECONSTRUCTIONS_SUBDIR, saved_epoch, CODES_SUBDIR, args.split
+        output_root, RECONSTRUCTIONS_SUBDIR, args.checkpoint, CODES_SUBDIR, args.split
     )
-    os.makedirs(codes_dir, exist_ok=True)
-    logging.info("Saving optimised latents to: %s", codes_dir)
-
-    chamfer_vals = []
-
-    for label in tqdm(labels, desc=f"Reconstructing [{args.split}]"):
-        out_path = os.path.join(codes_dir, f"{label}.pth")
-        if args.skip and os.path.isfile(out_path):
-            logging.debug("Skipping %s (already exists)", label)
-            continue
-
-        pos_t, neg_t = ram[label]
-        latent = _optimise_latent(
-            decoder=decoder,
-            pos_tensor=pos_t,
-            neg_tensor=neg_t,
-            latent_size=latent_size,
-            emp_mean=emp_mean,
-            emp_std=emp_std,
-            clamp_dist=clamp_dist,
-            num_iterations=args.iters,
-            num_samples=args.num_samples,
-            lr=args.lr,
-            l2reg=True,
-        )
-        torch.save(latent, out_path)
-
-        if args.chamfer:
-            # Evaluate reconstruction quality using near-surface points as GT proxy
-            all_pts = torch.cat([pos_t[:, :3], neg_t[:, :3]], dim=0)
-            if all_pts.shape[0] > 4096:
-                idx = torch.randperm(all_pts.shape[0])[:4096]
-                all_pts = all_pts[idx]
-            gt_pts = all_pts.cuda()
-
-            # Reconstruct predicted surface points from SDF grid
-            grid_res = 32
-            bbox = clamp_dist * 1.5
-            vals = torch.linspace(-bbox, bbox, grid_res)
-            g = torch.meshgrid(vals, vals, vals, indexing="ij")
-            grid = torch.stack([g_.ravel() for g_ in g], dim=1).cuda()
-
-            with torch.no_grad():
-                lat_exp = latent.cuda().unsqueeze(0).expand(grid.shape[0], -1)
-                net_in = torch.cat([lat_exp, grid], dim=1)
-                pred_sdf = decoder(net_in).squeeze(1)
-
-            surface_mask = pred_sdf.abs() < (bbox / grid_res * 2)
-            surface_pts = grid[surface_mask]
-            if surface_pts.shape[0] >= 4:
-                cd = _chamfer(surface_pts.float(), gt_pts.float())
-                chamfer_vals.append(cd)
-                logging.debug("  %s  CD=%.5f", label, cd)
-
-    if args.chamfer and chamfer_vals:
-        mean_cd = float(np.mean(chamfer_vals))
-        print(
-            f"\nCheckpoint {args.checkpoint} | split={args.split} | "
-            f"mean Chamfer = {mean_cd * 1000:.3f} mm  (n={len(chamfer_vals)})"
-        )
-    elif args.chamfer:
-        print(f"\nCheckpoint {args.checkpoint} | split={args.split} | no valid Chamfer values")
-
     print(f"\nDone. Latents written to:\n  {codes_dir}")
     print(
         f"\nTo use as Stage 2 targets, set in configs/train_encoder.yaml:\n"
@@ -307,9 +461,13 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
-            "Test-time latent optimisation for PointSDF_2 — "
-            "checkpoint selection (val) and Stage 2 target generation (train)."
-        )
+            "Test-time latent optimisation for PointSDF_2.\n\n"
+            "Sweep mode (--all-checkpoints): finds the best Stage 1 epoch by evaluating\n"
+            "Chamfer distance on the val split for every N-th saved checkpoint.\n"
+            "Single-checkpoint mode (--checkpoint): reconstructs one checkpoint and\n"
+            "generates latent targets for Stage 2 training."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--decoder_config", "-c",
@@ -322,15 +480,35 @@ if __name__ == "__main__":
         help="Stage 1 output directory containing ModelParameters/ and LatentCodes/. "
              "Falls back to cfg['output_dir'] if omitted.",
     )
-    parser.add_argument(
+
+    # ---- Checkpoint selection: sweep or single ----
+    ckpt_group = parser.add_mutually_exclusive_group()
+    ckpt_group.add_argument(
+        "--all-checkpoints",
+        dest="all_checkpoints",
+        type=int,
+        nargs="?",
+        const=10,           # default step when flag is given without a value
+        default=None,       # None means single-checkpoint mode
+        metavar="STEP",
+        help=(
+            "Sweep all numeric checkpoints in ModelParameters/, testing every STEP-th epoch. "
+            "Defaults to STEP=10 (matching corepp/run_scripts_reconstruct.sh) if no value is given. "
+            "Implies --chamfer and --skip. Example: --all-checkpoints 50"
+        ),
+    )
+    ckpt_group.add_argument(
         "--checkpoint",
         default="latest",
-        help="Decoder checkpoint name without .pth (e.g. 500, latest). Default: latest.",
+        help="Single checkpoint name without .pth (e.g. 500, latest). Default: latest. "
+             "Cannot be combined with --all-checkpoints.",
     )
+
     parser.add_argument(
         "--split",
         default="train",
-        help="Which split(s) to reconstruct, comma-separated (e.g. train, val, train,val). "
+        help="Which split(s) to reconstruct, comma-separated (e.g. train, val). "
+             "Use 'val' for checkpoint selection, 'train' for Stage 2 target generation. "
              "Default: train.",
     )
     parser.add_argument(
@@ -346,7 +524,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dir",
         default=None,
-        help="Root dir for Reconstructions/ output. Defaults to experiment_dir.",
+        help="Root directory for Reconstructions/ output. Defaults to experiment_dir.",
     )
     parser.add_argument(
         "--iters",
@@ -369,17 +547,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--chamfer",
         action="store_true",
-        help="Compute and report mean Chamfer distance after reconstruction.",
+        help="Compute and report mean Chamfer distance (single-checkpoint mode only). "
+             "Always enabled in --all-checkpoints mode.",
     )
     parser.add_argument(
         "--skip",
         action="store_true",
-        help="Skip shapes whose .pth file already exists in the output directory.",
+        help="Re-use latent .pth files that already exist instead of recomputing them. "
+             "Always enabled in --all-checkpoints mode.",
     )
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
-        help="Enable debug logging.",
+        help="Enable debug logging (per-shape Chamfer distances etc.).",
     )
     args = parser.parse_args()
     main(args)
