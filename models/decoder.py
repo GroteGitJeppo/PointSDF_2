@@ -1,75 +1,138 @@
-import torch
 import torch.nn as nn
+import torch
+import torch.nn.functional as F
 
 
-class SDFDecoder(nn.Module):
+class Decoder(nn.Module):
+    def __init__(
+        self,
+        latent_size,
+        dims,
+        dropout=None,
+        dropout_prob=0.0,
+        norm_layers=(),
+        latent_in=(),
+        weight_norm=False,
+        xyz_in_all=None,
+        use_tanh=False,
+        latent_dropout=False,
+    ):
+        super(Decoder, self).__init__()
+
+        def make_sequence():
+            return []
+
+        dims = [latent_size + 3] + dims + [1]
+
+        self.num_layers = len(dims)
+        self.norm_layers = norm_layers
+        self.latent_in = latent_in
+        self.latent_dropout = latent_dropout
+        if self.latent_dropout:
+            self.lat_dp = nn.Dropout(0.2)
+
+        self.xyz_in_all = xyz_in_all
+        self.weight_norm = weight_norm
+
+        for layer in range(0, self.num_layers - 1):
+            if layer + 1 in latent_in:
+                out_dim = dims[layer + 1] - dims[0]
+            else:
+                out_dim = dims[layer + 1]
+                if self.xyz_in_all and layer != self.num_layers - 2:
+                    out_dim -= 3
+
+            if weight_norm and layer in self.norm_layers:
+                setattr(
+                    self,
+                    "lin" + str(layer),
+                    nn.utils.parametrizations.weight_norm(nn.Linear(dims[layer], out_dim)),
+                )
+            else:
+                setattr(self, "lin" + str(layer), nn.Linear(dims[layer], out_dim))
+
+            if (
+                (not weight_norm)
+                and self.norm_layers is not None
+                and layer in self.norm_layers
+            ):
+                setattr(self, "bn" + str(layer), nn.LayerNorm(out_dim))
+
+        self.use_tanh = use_tanh
+        if use_tanh:
+            self.tanh = nn.Tanh()
+        self.relu = nn.ReLU()
+
+        self.dropout_prob = dropout_prob
+        self.dropout = dropout
+        self.th = nn.Tanh()
+
+    # input: N x (L+3)
+    def forward(self, input):
+        xyz = input[:, -3:]
+
+        if input.shape[1] > 3 and self.latent_dropout:
+            latent_vecs = input[:, :-3]
+            latent_vecs = F.dropout(latent_vecs, p=0.2, training=self.training)
+            x = torch.cat([latent_vecs, xyz], 1)
+        else:
+            x = input
+
+        for layer in range(0, self.num_layers - 1):
+            lin = getattr(self, "lin" + str(layer))
+            if layer in self.latent_in:
+                x = torch.cat([x, input], -1)
+            elif layer != 0 and self.xyz_in_all:
+                x = torch.cat([x, xyz], 1)
+            x = lin(x)
+            # last layer Tanh
+            if layer == self.num_layers - 2 and self.use_tanh:
+                x = self.tanh(x)
+            if layer < self.num_layers - 2:
+                if (
+                    self.norm_layers is not None
+                    and layer in self.norm_layers
+                    and not self.weight_norm
+                ):
+                    bn = getattr(self, "bn" + str(layer))
+                    x = bn(x)
+                x = self.relu(x)
+                if self.dropout is not None and layer in self.dropout:
+                    x = F.dropout(x, p=self.dropout_prob, training=self.training)
+
+        if hasattr(self, "th"):
+            x = self.th(x)
+
+        return x
+
+
+class SDFDecoder(Decoder):
     """
-    DeepSDF-style weight-normed MLP decoder.
+    Simplified interface over the corepp-style Decoder.
 
-    Input:  concat(latent_code, xyz)  — shape (N, latent_size + 3)
-    Output: SDF scalar                — shape (N, 1)
-
-    A skip connection re-injects the full input after the first 3 layers,
-    following the architecture in Park et al. (CVPR 2019).
+    Translates high-level knobs (num_layers, inner_dim, skip_connections,
+    dropout_prob, weight_norm) into the full Decoder signature so the rest
+    of the repo doesn't need to construct dims / norm_layers / latent_in by
+    hand.  The underlying forward pass is unchanged.
     """
 
     def __init__(
         self,
-        latent_size: int = 64,
+        latent_size: int,
         num_layers: int = 8,
         inner_dim: int = 256,
         skip_connections: bool = True,
+        dropout_prob: float = 0.2,
+        weight_norm: bool = True,
     ):
-        super().__init__()
-        self.num_layers = num_layers
-        self.skip_connections = skip_connections
-        self.latent_size = latent_size
-
-        input_dim = latent_size + 3
-        self.input_dim = input_dim
-
-        # 2 layers are outside the sequential stack (skip_layer + final_layer)
-        # when skip_connections is active and num_layers >= 8.
-        num_extra_layers = 2 if (skip_connections and num_layers >= 8) else 1
-
-        layers = []
-        for _ in range(num_layers - num_extra_layers):
-            layers.append(
-                nn.Sequential(
-                    nn.utils.parametrizations.weight_norm(
-                        nn.Linear(input_dim, inner_dim)
-                    ),
-                    nn.ReLU(),
-                )
-            )
-            input_dim = inner_dim
-
-        self.net = nn.Sequential(*layers)
-        self.final_layer = nn.Sequential(nn.Linear(inner_dim, 1), nn.Tanh())
-        # After the skip, the channel count changes: inner_dim - input_dim channels
-        # from skip_layer are concatenated with the original input_dim channels.
-        self.skip_layer = nn.Sequential(
-            nn.Linear(inner_dim, inner_dim - self.input_dim),
-            nn.ReLU(),
+        all_layers = tuple(range(num_layers))
+        latent_in = (num_layers // 2,) if skip_connections else ()
+        super().__init__(
+            latent_size=latent_size,
+            dims=[inner_dim] * num_layers,
+            dropout=all_layers,
+            dropout_prob=dropout_prob,
+            norm_layers=all_layers,
+            latent_in=latent_in,
+            weight_norm=weight_norm,
         )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (N, latent_size + 3) — latent code concatenated with xyz query
-        Returns:
-            sdf: (N, 1)
-        """
-        skip_input = x  # preserve for skip re-injection (full gradient flow)
-
-        if self.skip_connections and self.num_layers >= 5:
-            h = x
-            for i in range(3):
-                h = self.net[i](h)
-            h = self.skip_layer(h)
-            h = torch.cat([h, skip_input], dim=1)
-            for i in range(self.num_layers - 5):
-                h = self.net[3 + i](h)
-            return self.final_layer(h)
-        else:
-            return self.final_layer(self.net(x))

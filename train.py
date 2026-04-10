@@ -157,7 +157,10 @@ def main(cfg: dict):
         inner_dim=decoder_cfg['inner_dim'],
         skip_connections=decoder_cfg['skip_connections'],
     ).float().to(device)
-    decoder.load_state_dict(torch.load(cfg['decoder_weights'], map_location=device))
+    _ckpt = torch.load(cfg['decoder_weights'], map_location=device)
+    _sd = _ckpt['model_state_dict'] if 'model_state_dict' in _ckpt else _ckpt
+    _sd = {k.removeprefix('module.'): v for k, v in _sd.items()}
+    decoder.load_state_dict(_sd)
     for p in decoder.parameters():
         p.requires_grad_(False)
     decoder.eval()

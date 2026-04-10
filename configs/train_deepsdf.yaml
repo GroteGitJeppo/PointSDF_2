@@ -1,7 +1,10 @@
 # ============================================================
 # Stage 1 config: DeepSDF autodecoder (PointSDF_2)
+# Training loop matches corepp/train_deep_sdf.py (L1 + reg, DataParallel).
 # Update paths to match your server layout.
 # ============================================================
+
+description: "PointSDF_2 DeepSDF Stage 1"
 
 # ---- Data --------------------------------------------------
 # samples.npz: <sdf_data_dir>/<label>/laser/samples.npz or .../<label>/samples.npz
@@ -18,6 +21,8 @@ batch_split: 1
 
 # ---- Output ------------------------------------------------
 output_dir: weights/deepsdf
+# If true, create output_dir/<DD_MM_HHMMSS>/; if false, write directly into output_dir
+timestamp_run_dir: true
 
 # ---- Architecture (must match Stage 2 decoder_config) -----
 latent_size:       32
@@ -33,6 +38,8 @@ tqdm:              true
 loss_multiplier:   1.0
 clamp:             true
 clamp_value:       0.1
+# If true, also clamp pred/gt in the loss like original DeepSDF (usually false; clamp above handles targets in the dataset)
+enforce_minmax:    false
 
 # Latent L2 / sphere regularisation (ramped over reg_ramp_epochs)
 code_regularization:         true
@@ -56,12 +63,10 @@ learning_rate_schedule:
   - Type: Constant
     Value: 0.001
 
-# ---- Checkpoints -------------------------------------------
-# Save full run under snapshots/<epoch>/ every N epochs (0 = disable)
+# ---- Checkpoints (corepp-style: ModelParameters/, LatentCodes/, etc.) -----
 snapshot_frequency: 10
-# Overwrite latest/ every N epochs for resume (0 = disable)
+additional_snapshots: []   # e.g. [0, 500] — extra epochs to save
 log_frequency:      10
 
 # ---- Resume ------------------------------------------------
-pretrained:   false
-pretrain_dir: ''   # folder containing decoder.pth, latent_embedding.pt, optimizer.pt, meta.pt
+# Use CLI: python train_deepsdf.py -c configs/train_deepsdf.yaml --continue-from latest
