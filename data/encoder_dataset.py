@@ -152,7 +152,7 @@ class PointCloudLatentDataset(Dataset):
         if self.apply_augmentation and self.transform is not None:
             data = self.transform(data)
 
-        latent = torch.load(latent_path, weights_only=True)  # (latent_size,)
+        latent = torch.load(latent_path, weights_only=True, map_location='cpu')  # (latent_size,)
         # Shape (1, latent_size) so PyG's Batch concatenates to (B, latent_size)
         data.latent = latent.unsqueeze(0)
 
