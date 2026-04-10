@@ -95,6 +95,7 @@ python train_deepsdf.py --config configs/train_deepsdf.yaml
 ```
 
 **Optional flags:**
+
 ```
 --continue-from latest    Resume from the most recent saved checkpoint.
 --continue-from 500       Resume from epoch 500 specifically.
@@ -104,6 +105,7 @@ python train_deepsdf.py --config configs/train_deepsdf.yaml
 ```
 
 **Output** — everything is written to `weights/deepsdf/<DD_MM_HHMMSS>/`:
+
 ```
 weights/deepsdf/<run>/
 ├── ModelParameters/
@@ -128,41 +130,63 @@ Training runs for **1001 epochs** by default. At epoch 500 an extra snapshot is 
 
 ### Step 2 — Select the best checkpoint and generate latent targets (Reconstruct)
 
-**What it does:** After Stage 1, you have ~100 checkpoints. This step finds the *best* one by doing a quick shape reconstruction on the val split for each checkpoint you want to evaluate. It also generates the high-quality latent codes that Stage 2 will use as training targets.
+**What it does:** After Stage 1, you have ~100 checkpoints saved. This step finds the *best* one by sweeping the val split across all checkpoints in a single command, then generates the high-quality latent codes that Stage 2 will use as training targets.
 
 The process for each potato shape: start with a random latent code, freeze the decoder, run 800 steps of gradient descent to make the decoder reproduce that potato's SDF as accurately as possible. The result is a *decoder-consistent* latent — the encoder will be trained to predict exactly these.
 
-#### Step 2a — Find the best checkpoint (evaluate val split)
+#### Step 2a — Find the best checkpoint (sweep the val split)
 
-Run this once per checkpoint you want to compare. A reasonable strategy is to test every 100 epochs (0, 100, 200, ..., 1000) plus epoch 500:
+Run this once — it automatically discovers every checkpoint saved in `ModelParameters/`, tests every N-th epoch on the val split, then prints a sorted leaderboard so you can pick the best one.
 
 ```bash
 python reconstruct.py \
     --decoder_config configs/train_deepsdf.yaml \
     --experiment_dir weights/deepsdf/<run> \
-    --checkpoint 500 \
     --split val \
-    --chamfer
+    --all-checkpoints        # tests every 10th epoch (corepp default)
 ```
 
 **Replace `<run>` with the actual run folder name (e.g. `09_04_210939`).**
 
-The `--chamfer` flag computes the Chamfer distance between the reconstructed surface and the ground-truth SDF points. Lower is better. Run this for each checkpoint you want to compare; the one with the lowest Chamfer distance on the val split is your best epoch `E*`.
+You can control how many epochs are skipped between tests:
 
 ```
---checkpoint 500    Epoch to evaluate. Try 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000.
---skip              Skip shapes that have already been reconstructed (safe to use on reruns).
---iters 800         Number of optimisation steps per shape (default 800, matching corepp).
---verbose           Show per-shape Chamfer distances.
+--all-checkpoints        Tests every 10th epoch: 10, 20, 30, … (default stride)
+--all-checkpoints 50     Tests every 50th epoch: 50, 100, 150, … (faster sweep)
+--all-checkpoints 1      Tests every single saved checkpoint (thorough but slow)
+--iters 800              Optimisation steps per shape (default 800, matching corepp)
+--verbose                Show per-shape Chamfer distances during the sweep
 ```
 
-**Output** for each checkpoint you evaluate:
+Sweep mode always computes Chamfer distances and always reuses already-computed latents (`--skip`) if you interrupted a previous run. SDF data is loaded into RAM only once regardless of how many checkpoints are tested.
+
+At the end the script prints a sorted leaderboard and tells you exactly which paths to use next:
+
+```
+Checkpoint sweep results — split='val', step=10
+-------------------------------------------
+  epoch  |  Chamfer (mm)
+-------------------------------------------
+    500  |     1.842  ← BEST
+    600  |     1.953
+    400  |     2.104
+    300  |     2.871
+    ...
+-------------------------------------------
+
+Best checkpoint: epoch 500  (Chamfer = 1.842 mm)
+
+Next steps — update configs/train_encoder.yaml:
+  decoder_weights: weights/deepsdf/<run>/ModelParameters/500.pth
+  latent_dir:      (run with --checkpoint 500 --split train to generate)
+```
+
+The epoch with the lowest Chamfer distance on the val split is your best epoch `E*`.
+
+**Output** (written during the sweep, reused on subsequent runs with `--skip`):
+
 ```
 weights/deepsdf/<run>/Reconstructions/<E>/Codes/val/<label>.pth   ← optimised latent per val shape
-```
-The script prints the mean Chamfer distance at the end, e.g.:
-```
-Checkpoint 500 | split=val | mean Chamfer = 1.842 mm  (n=51)
 ```
 
 #### Step 2b — Generate latent targets for Stage 2 (train split, best checkpoint)
@@ -178,11 +202,13 @@ python reconstruct.py \
 ```
 
 **Output:**
+
 ```
 weights/deepsdf/<run>/Reconstructions/<E*>/Codes/train/<label>.pth   ← one file per train shape
 ```
 
 The script prints exactly which path to put in the Stage 2 config, e.g.:
+
 ```
 To use as Stage 2 targets, set in configs/train_encoder.yaml:
   latent_dir: weights/deepsdf/<run>/Reconstructions/<E*>/Codes/train
@@ -216,6 +242,7 @@ python train.py --config configs/train_encoder.yaml
 No other flags are needed for a standard run.
 
 **Output** — everything is written to `weights/encoder/<DD_MM_HHMMSS>/`:
+
 ```
 weights/encoder/<run>/
 ├── encoder.pth             ← best encoder weights (lowest val loss so far)
@@ -229,6 +256,7 @@ weights/encoder/<run>/
 ```
 
 Training logs to TensorBoard. To monitor:
+
 ```bash
 tensorboard --logdir weights/encoder/<run>
 ```
@@ -252,6 +280,7 @@ python test.py \
 ```
 
 **Output — printed to console:**
+
 ```
 Test results (49/51 with valid meshes):
   MAE volume:  18.4 mL
@@ -285,9 +314,9 @@ python data/prepare_dataset.py pcd --img_root data/3DPotatoTwin/1_rgbd/1_image \
 # 1. Train decoder (Stage 1) — ~1001 epochs, several hours on A40
 python train_deepsdf.py --config configs/train_deepsdf.yaml
 
-# 2a. Find best checkpoint — repeat for each epoch you want to compare
+# 2a. Find best checkpoint — sweep val split, every 10th epoch (prints a sorted leaderboard)
 python reconstruct.py -c configs/train_deepsdf.yaml \
-    --experiment_dir weights/deepsdf/<run> --checkpoint 500 --split val --chamfer
+    --experiment_dir weights/deepsdf/<run> --split val --all-checkpoints
 
 # 2b. Generate latent targets for Stage 2 using the best epoch E*
 python reconstruct.py -c configs/train_deepsdf.yaml \
@@ -338,62 +367,68 @@ PointSDF_2/
 
 ### `configs/train_deepsdf.yaml` (Stage 1)
 
-| Key | Default | What it controls |
-|---|---|---|
-| `sdf_data_dir` | `data/3DPotatoTwin/sdfsamples/potato` | Where to find `samples.npz` files |
-| `splits_csv` | `data/3DPotatoTwin/splits.csv` | Which labels belong to which split |
-| `stage1_splits` | `[train]` | Which splits to include in decoder training |
-| `latent_size` | `32` | Dimensionality of each shape's latent code |
-| `inner_dim` | `512` | Width of each hidden layer in the decoder MLP |
-| `num_layers` | `8` | Number of hidden layers |
-| `skip_connections` | `true` | Whether to concatenate input at layer 4 (the DeepSDF skip) |
-| `epochs` | `1001` | Total training epochs |
-| `clamp_value` | `0.1` | SDF values are clamped to ±0.1 m (focus on near-surface region) |
-| `code_bound` | `1.0` | Maximum L2 norm of any latent code (prevents blow-up) |
-| `code_regularization_lambda` | `0.0001` | Weight of the latent L2 regularisation loss |
-| `reg_ramp_epochs` | `100` | Latent reg is ramped from 0 to full weight over this many epochs |
-| `snapshot_frequency` | `10` | Save a checkpoint every N epochs |
-| `additional_snapshots` | `[0, 500]` | Always save at these specific epochs too |
-| `seed` | `42` | Random seed for reproducibility |
+
+| Key                          | Default                               | What it controls                                                 |
+| ---------------------------- | ------------------------------------- | ---------------------------------------------------------------- |
+| `sdf_data_dir`               | `data/3DPotatoTwin/sdfsamples/potato` | Where to find `samples.npz` files                                |
+| `splits_csv`                 | `data/3DPotatoTwin/splits.csv`        | Which labels belong to which split                               |
+| `stage1_splits`              | `[train]`                             | Which splits to include in decoder training                      |
+| `latent_size`                | `32`                                  | Dimensionality of each shape's latent code                       |
+| `inner_dim`                  | `512`                                 | Width of each hidden layer in the decoder MLP                    |
+| `num_layers`                 | `8`                                   | Number of hidden layers                                          |
+| `skip_connections`           | `true`                                | Whether to concatenate input at layer 4 (the DeepSDF skip)       |
+| `epochs`                     | `1001`                                | Total training epochs                                            |
+| `clamp_value`                | `0.1`                                 | SDF values are clamped to ±0.1 m (focus on near-surface region)  |
+| `code_bound`                 | `1.0`                                 | Maximum L2 norm of any latent code (prevents blow-up)            |
+| `code_regularization_lambda` | `0.0001`                              | Weight of the latent L2 regularisation loss                      |
+| `reg_ramp_epochs`            | `100`                                 | Latent reg is ramped from 0 to full weight over this many epochs |
+| `snapshot_frequency`         | `10`                                  | Save a checkpoint every N epochs                                 |
+| `additional_snapshots`       | `[0, 500]`                            | Always save at these specific epochs too                         |
+| `seed`                       | `42`                                  | Random seed for reproducibility                                  |
+
 
 ### `configs/train_encoder.yaml` (Stage 2)
 
-| Key | Default | What it controls |
-|---|---|---|
-| `data_root` | `data/3DPotatoTwin/1_rgbd/2_pcd` | Root folder of partial point cloud `.ply` files |
-| `splits_csv` | `data/3DPotatoTwin/splits.csv` | Train/val/test label assignments |
-| `latent_dir` | *(must be set after Step 2b)* | Folder of `<label>.pth` latent target files |
-| `decoder_weights` | *(must be set after Step 2a)* | Path to the best Stage 1 `ModelParameters/<E*>.pth` |
-| `decoder_config` | `configs/train_deepsdf.yaml` | Used to read the decoder architecture |
-| `num_points` | `1024` | Number of points to sample from each partial point cloud |
-| `epochs` | `500` | Total training epochs |
-| `batch_size` | `16` | Shapes per batch |
-| `lr` | `0.0001` | Encoder learning rate |
-| `lr_gamma` | `0.995` | Exponential LR decay per epoch |
-| `sigma_regulariser` | `0.01` | Weight of the latent L2 regularisation on encoder outputs |
-| `contrastive_loss` | `true` | Enable AttRepLoss (attract same-tuber latents, repel different) |
-| `lambda_attraction` | `0.05` | Weight of the contrastive loss term |
-| `delta_rep` | `0.5` | Repulsion margin — latents of different tubers must be at least this far apart |
-| `sdf_loss_weight` | `0.1` | Weight of the optional end-to-end SDF loss through the frozen decoder |
-| `snapshot_frequency` | `10` | Save a snapshot every N epochs for post-hoc best-checkpoint selection |
-| `grid_resolution` | `64` | SDF query grid resolution for inference (64³ = 262 144 points) |
-| `grid_bbox` | `0.15` | Half-size of the query bounding box in metres (±0.15 m cube) |
+
+| Key                  | Default                          | What it controls                                                               |
+| -------------------- | -------------------------------- | ------------------------------------------------------------------------------ |
+| `data_root`          | `data/3DPotatoTwin/1_rgbd/2_pcd` | Root folder of partial point cloud `.ply` files                                |
+| `splits_csv`         | `data/3DPotatoTwin/splits.csv`   | Train/val/test label assignments                                               |
+| `latent_dir`         | *(must be set after Step 2b)*    | Folder of `<label>.pth` latent target files                                    |
+| `decoder_weights`    | *(must be set after Step 2a)*    | Path to the best Stage 1 `ModelParameters/<E*>.pth`                            |
+| `decoder_config`     | `configs/train_deepsdf.yaml`     | Used to read the decoder architecture                                          |
+| `num_points`         | `1024`                           | Number of points to sample from each partial point cloud                       |
+| `epochs`             | `500`                            | Total training epochs                                                          |
+| `batch_size`         | `16`                             | Shapes per batch                                                               |
+| `lr`                 | `0.0001`                         | Encoder learning rate                                                          |
+| `lr_gamma`           | `0.995`                          | Exponential LR decay per epoch                                                 |
+| `sigma_regulariser`  | `0.01`                           | Weight of the latent L2 regularisation on encoder outputs                      |
+| `contrastive_loss`   | `true`                           | Enable AttRepLoss (attract same-tuber latents, repel different)                |
+| `lambda_attraction`  | `0.05`                           | Weight of the contrastive loss term                                            |
+| `delta_rep`          | `0.5`                            | Repulsion margin — latents of different tubers must be at least this far apart |
+| `sdf_loss_weight`    | `0.1`                            | Weight of the optional end-to-end SDF loss through the frozen decoder          |
+| `snapshot_frequency` | `10`                             | Save a snapshot every N epochs for post-hoc best-checkpoint selection          |
+| `grid_resolution`    | `64`                             | SDF query grid resolution for inference (64³ = 262 144 points)                 |
+| `grid_bbox`          | `0.15`                           | Half-size of the query bounding box in metres (±0.15 m cube)                   |
+
 
 ---
 
 ## Key design choices
 
-| Choice | Rationale |
-|---|---|
-| Two-stage training (decoder first, then encoder) | The decoder learns a general shape space from complete SDF data; the encoder then maps partial observations into that space. Training them separately is simpler and avoids the encoder interfering with SDF learning. |
-| Test-time latent optimisation for Stage 2 targets | After Stage 1, each training latent is further refined with the *fixed* final decoder. This gives the encoder cleaner, more consistent targets than the raw autodecoder embeddings. |
-| Checkpoint selection by Chamfer distance on val split | The decoder's reconstruction quality on unseen shapes (val) peaks before the decoder memorises the training shapes. Chamfer distance on the val split is the right signal. |
-| Convex hull (not marching cubes) for volume | Potatoes are roughly convex; convex hull is always watertight, GPU-accelerated via Open3D, and avoids marching cubes grid resolution artefacts. |
-| Latent size 32 | CoRe++ systematic study found latent size 32 optimal for potato tubers, balancing shape representational capacity and generalisation. |
-| Decoder width 512 | Matches the original DeepSDF and CoRe++ configuration. |
-| AttRepLoss (contrastive) in Stage 2 | Pulls latent codes of multiple images of the *same* potato together and pushes codes of *different* potatoes apart. Makes the latent space more structured, which helps the encoder generalise. |
-| MSE loss for encoder | Penalises large latent deviations more than L1; validated by CoRe++ ablation. |
-| PointNet++ encoder (not RGB-D CNN) | Input is a partial 3D point cloud rather than an RGB-D image, making the approach agnostic to camera calibration and depth noise characteristics. |
+
+| Choice                                                | Rationale                                                                                                                                                                                                              |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Two-stage training (decoder first, then encoder)      | The decoder learns a general shape space from complete SDF data; the encoder then maps partial observations into that space. Training them separately is simpler and avoids the encoder interfering with SDF learning. |
+| Test-time latent optimisation for Stage 2 targets     | After Stage 1, each training latent is further refined with the *fixed* final decoder. This gives the encoder cleaner, more consistent targets than the raw autodecoder embeddings.                                    |
+| Checkpoint selection by Chamfer distance on val split | The decoder's reconstruction quality on unseen shapes (val) peaks before the decoder memorises the training shapes. Chamfer distance on the val split is the right signal.                                             |
+| Convex hull (not marching cubes) for volume           | Potatoes are roughly convex; convex hull is always watertight, GPU-accelerated via Open3D, and avoids marching cubes grid resolution artefacts.                                                                        |
+| Latent size 32                                        | CoRe++ systematic study found latent size 32 optimal for potato tubers, balancing shape representational capacity and generalisation.                                                                                  |
+| Decoder width 512                                     | Matches the original DeepSDF and CoRe++ configuration.                                                                                                                                                                 |
+| AttRepLoss (contrastive) in Stage 2                   | Pulls latent codes of multiple images of the *same* potato together and pushes codes of *different* potatoes apart. Makes the latent space more structured, which helps the encoder generalise.                        |
+| MSE loss for encoder                                  | Penalises large latent deviations more than L1; validated by CoRe++ ablation.                                                                                                                                          |
+| PointNet++ encoder (not RGB-D CNN)                    | Input is a partial 3D point cloud rather than an RGB-D image, making the approach agnostic to camera calibration and depth noise characteristics.                                                                      |
+
 
 ---
 
@@ -418,3 +453,4 @@ PointSDF_2/
       doi={10.1016/j.compag.2024.109673},
 }
 ```
+
