@@ -11,8 +11,8 @@ description: "PointSDF_2 DeepSDF Stage 1"
 sdf_data_dir: data/3DPotatoTwin/sdfsamples/potato
 splits_csv:   data/3DPotatoTwin/splits.csv
 
-# Labels from these splits get Stage 1 latents (test excluded for holdout).
-stage1_splits: [train, val]
+# Labels from the train split only (matching corepp: val used only for checkpoint selection).
+stage1_splits: [train]
 
 # Random SDF points drawn per shape per optimiser step (samples_per_scene).
 samples_per_scene: 16384
@@ -27,18 +27,15 @@ timestamp_run_dir: true
 # ---- Architecture (must match Stage 2 decoder_config) -----
 latent_size:       32
 num_layers:        8
-inner_dim:         256
+inner_dim:         512
 skip_connections:  true
 
 # ---- Training ----------------------------------------------
 seed:              42
-epochs:            5000
-# Per-epoch progress bar over shapes (tqdm); false = plain loop / quieter logs
-tqdm:              true
-loss_multiplier:   1.0
+epochs:            1001
 clamp:             true
 clamp_value:       0.1
-# If true, also clamp pred/gt in the loss like original DeepSDF (usually false; clamp above handles targets in the dataset)
+# If true, also clamp pred/gt in the loss (usually false; clamp above handles targets in the dataset)
 enforce_minmax:    false
 
 # Latent L2 / sphere regularisation (ramped over reg_ramp_epochs)
@@ -49,23 +46,27 @@ reg_ramp_epochs:             100
 
 # nn.Embedding init: N(0, code_init_std_dev / sqrt(latent_size))
 code_init_std_dev: 1.0
-# If set, Embedding max_norm (L2); omit or null for no bound
-code_bound: null
+# Embedding max_norm (L2 bound, matching corepp CodeBound: 1.0)
+code_bound: 1.0
 
 # Optional gradient clip (L2 norm); null to disable
 gradient_clip_norm: null
 
 # ---- Learning rates (two entries: decoder, then latents) ---
-# Types: Constant | Step | Warmup
+# Step schedule matching corepp specs.json exactly.
 learning_rate_schedule:
-  - Type: Constant
-    Value: 0.0001
-  - Type: Constant
-    Value: 0.001
+  - Type: Step
+    Initial: 0.0005
+    Interval: 300
+    Factor: 0.5
+  - Type: Step
+    Initial: 0.001
+    Interval: 300
+    Factor: 0.5
 
 # ---- Checkpoints (corepp-style: ModelParameters/, LatentCodes/, etc.) -----
 snapshot_frequency: 10
-additional_snapshots: []   # e.g. [0, 500] — extra epochs to save
+additional_snapshots: [0, 500]   # match corepp AdditionalSnapshots
 log_frequency:      10
 
 # ---- Resume ------------------------------------------------

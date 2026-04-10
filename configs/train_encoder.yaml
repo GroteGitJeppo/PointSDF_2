@@ -10,14 +10,16 @@ target_csv:    data/3DPotatoTwin/mesh_traits_2023.csv
 volume_column: "volume (cm3)"     # column in target_csv that holds ground-truth volume (cm³ = mL)
 metadata_csv:  data/3DPotatoTwin/ground_truth.csv   # optional: provides cultivar / growing_season columns
 
-# Directory of per-label latent codes produced by Stage 1.
+# Directory of per-label latent codes produced by reconstruct.py (test-time optimised).
+# Run: python reconstruct.py -c configs/train_deepsdf.yaml \
+#          --experiment_dir weights/deepsdf/<run> --checkpoint <E*> --split train
 # Each file: <latent_dir>/<label>.pth  (single tensor of shape latent_size)
-# Set this to the latent_codes/ subfolder of the best Stage 1 run.
-latent_dir: weights/deepsdf/09_04_210939/latent_codes_32_optimized
+latent_dir: weights/deepsdf/<run>/Reconstructions/<E*>/Codes/train
 
 # ---- Stage 1 decoder (frozen) ------------------------------
-# Path to the decoder.pth saved by Stage 1
-decoder_weights: weights/deepsdf/09_04_210939/snapshots/0820/decoder.pth
+# Path to the best Stage 1 ModelParameters checkpoint (e.g. 500.pth).
+# Use the epoch E* selected by Chamfer distance on the val split via reconstruct.py.
+decoder_weights: weights/deepsdf/<run>/ModelParameters/<E*>.pth
 # Path to the Stage 1 config (used to read architecture params)
 decoder_config:  configs/train_deepsdf.yaml
 
@@ -44,6 +46,13 @@ sdf_data_dir:           data/3DPotatoTwin/sdfsamples/potato
 sdf_samples_per_shape:  1024   # SDF points sampled per shape per batch step
 sdf_clamp_value:        0.1    # match Stage 1 clamp_value
 sdf_loss_weight:        0.1    # weight of the SDF L1 loss relative to latent MSE
+
+# ---- Contrastive loss (AttRepLoss, matching corepp) --------
+# Attracts latents of the same tuber, repels latents of different tubers.
+# Requires each batch item to carry its label (potato tuber ID).
+contrastive_loss:   true
+lambda_attraction:  0.05      # weight applied to AttRepLoss (matches corepp super3d_32.json)
+delta_rep:          0.5       # margin for repulsion hinge loss
 
 # ---- Inference / test settings -----------------------------
 grid_resolution: 64          # resolution^3 SDF query points per sample

@@ -15,11 +15,13 @@ import json
 import logging
 import math
 import os
+import random
 import signal
 import sys
 import time
 from datetime import datetime
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -272,6 +274,11 @@ def build_decoder(cfg):
 def main_function(cfg, continue_from, batch_split):
     experiment_directory = cfg["_experiment_directory"]
 
+    seed = cfg.get("seed", 133)
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
     logging.debug("running %s", experiment_directory)
 
     lr_specs = cfg["learning_rate_schedule"]
@@ -305,6 +312,7 @@ def main_function(cfg, continue_from, batch_split):
         cfg, "code_regularization_sphere", False
     )
     code_reg_lambda = float(get_spec_with_default(cfg, "code_regularization_lambda", 1e-4))
+    reg_ramp_epochs = int(get_spec_with_default(cfg, "reg_ramp_epochs", 100))
 
     decoder = build_decoder(cfg)
     logging.info(decoder)
@@ -479,14 +487,14 @@ def main_function(cfg, continue_from, batch_split):
                 if do_code_regularization:
                     l2_size_loss = torch.sum(torch.norm(batch_vecs, dim=1))
                     reg_loss = (
-                        code_reg_lambda * min(1, epoch / 100) * l2_size_loss
+                        code_reg_lambda * min(1, epoch / reg_ramp_epochs) * l2_size_loss
                     ) / num_sdf_samples
                     chunk_loss = chunk_loss + reg_loss
 
                 if do_code_regularization_sphere:
                     sphere_loss_reg = torch.abs(1 - torch.norm(batch_vecs, dim=1)).sum()
                     reg_loss = (
-                        code_reg_lambda * min(1, epoch / 100) * sphere_loss_reg
+                        code_reg_lambda * min(1, epoch / reg_ramp_epochs) * sphere_loss_reg
                     ) / num_sdf_samples
                     chunk_loss = chunk_loss + reg_loss
 

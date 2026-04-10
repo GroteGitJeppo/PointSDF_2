@@ -44,12 +44,48 @@ if not WITH_TORCH_CLUSTER:
 
 
 # ---------------------------------------------------------------------------
+# Contrastive loss (AttRepLoss) — ported from corepp/loss.py
+# ---------------------------------------------------------------------------
+
+def att_rep_loss(latents: torch.Tensor, labels: list, delta_rep: float = 0.5) -> torch.Tensor:
+    """
+    Attraction-repulsion contrastive loss (Magistri et al., 2022 / corepp).
+
+    For each pair (i, j):
+      - same label  → attract: penalise ||z_i - z_j||
+      - diff label  → repel:   penalise max(0, delta_rep - ||z_i - z_j||)
+
+    Args:
+        latents:   (B, latent_size) predicted latent vectors
+        labels:    list of B label strings (potato tuber IDs)
+        delta_rep: repulsion margin (default 0.5, matching corepp)
+    Returns:
+        scalar loss
+    """
+    hinged = torch.nn.HingeEmbeddingLoss(margin=delta_rep, reduction='none')
+    h_loss = torch.tensor(0.0, device=latents.device)
+    for lbl, z in zip(labels, latents):
+        dist = torch.linalg.norm(z - latents, dim=1)           # (B,)
+        # +1 for same label (attract), -1 for different (repel)
+        same = torch.tensor(
+            [1 if l == lbl else -1 for l in labels],
+            dtype=torch.float, device=latents.device,
+        )
+        h_loss = h_loss + hinged(dist, same).sum()
+    return h_loss
+
+
+# ---------------------------------------------------------------------------
 # Training / validation steps
 # ---------------------------------------------------------------------------
 
-def train_epoch(encoder, decoder, optimizer, loader, sigma, sdf_loss_weight, device):
+def train_epoch(
+    encoder, decoder, optimizer, loader,
+    sigma, sdf_loss_weight, device,
+    contrastive: bool = False, lambda_attraction: float = 0.05, delta_rep: float = 0.5,
+):
     encoder.train()
-    total_loss = total_mse = total_reg = total_sdf = 0.0
+    total_loss = total_mse = total_reg = total_sdf = total_att = 0.0
 
     for batch in loader:
         batch = batch.to(device)
@@ -60,6 +96,12 @@ def train_epoch(encoder, decoder, optimizer, loader, sigma, sdf_loss_weight, dev
         mse = F.mse_loss(pred_latent, latent_gt.detach())
         reg = sigma ** 2 * pred_latent.pow(2).sum(dim=1).mean()
         loss = mse + reg
+
+        # Contrastive loss (matches corepp's AttRepLoss with lambda_attraction=0.05)
+        att_l = torch.tensor(0.0, device=device)
+        if contrastive and hasattr(batch, 'label'):
+            att_l = att_rep_loss(pred_latent, batch.label, delta_rep)
+            loss = loss + lambda_attraction * att_l
 
         # End-to-end SDF loss: run predicted latent through the frozen decoder
         # on the GT SDF query points, supervise with GT SDF values.
@@ -85,15 +127,20 @@ def train_epoch(encoder, decoder, optimizer, loader, sigma, sdf_loss_weight, dev
         total_mse += mse.item()
         total_reg += reg.item()
         total_sdf += sdf_l.item()
+        total_att += att_l.item()
 
     n = len(loader)
-    return total_loss / n, total_mse / n, total_reg / n, total_sdf / n
+    return total_loss / n, total_mse / n, total_reg / n, total_sdf / n, total_att / n
 
 
 @torch.no_grad()
-def val_epoch(encoder, decoder, loader, sigma, sdf_loss_weight, device):
+def val_epoch(
+    encoder, decoder, loader,
+    sigma, sdf_loss_weight, device,
+    contrastive: bool = False, lambda_attraction: float = 0.05, delta_rep: float = 0.5,
+):
     encoder.eval()
-    total_loss = total_mse = total_reg = total_sdf = 0.0
+    total_loss = total_mse = total_reg = total_sdf = total_att = 0.0
 
     for batch in loader:
         batch = batch.to(device)
@@ -104,6 +151,11 @@ def val_epoch(encoder, decoder, loader, sigma, sdf_loss_weight, device):
         mse = F.mse_loss(pred_latent, latent_gt)
         reg = sigma ** 2 * pred_latent.pow(2).sum(dim=1).mean()
         loss = mse + reg
+
+        att_l = torch.tensor(0.0, device=device)
+        if contrastive and hasattr(batch, 'label'):
+            att_l = att_rep_loss(pred_latent, batch.label, delta_rep)
+            loss = loss + lambda_attraction * att_l
 
         sdf_l = torch.tensor(0.0, device=device)
         if sdf_loss_weight > 0.0 and batch.sdf_xyz is not None:
@@ -121,9 +173,10 @@ def val_epoch(encoder, decoder, loader, sigma, sdf_loss_weight, device):
         total_mse += mse.item()
         total_reg += reg.item()
         total_sdf += sdf_l.item()
+        total_att += att_l.item()
 
     n = len(loader)
-    return total_loss / n, total_mse / n, total_reg / n, total_sdf / n
+    return total_loss / n, total_mse / n, total_reg / n, total_sdf / n, total_att / n
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +272,12 @@ def main(cfg: dict):
         print('WARNING: sdf_loss_weight > 0 but sdf_data_dir is not set — SDF loss disabled.')
         sdf_loss_weight = 0.0
 
+    use_contrastive = bool(cfg.get('contrastive_loss', False))
+    lambda_attraction = float(cfg.get('lambda_attraction', 0.05))
+    delta_rep = float(cfg.get('delta_rep', 0.5))
+    if use_contrastive:
+        print(f'Contrastive loss (AttRepLoss) enabled — lambda={lambda_attraction}, delta_rep={delta_rep}')
+
     # ----- Training loop -----
     snapshot_freq = int(cfg.get('snapshot_frequency', 10))
     snapshots_dir = os.path.join(output_dir, 'snapshots')
@@ -227,20 +286,23 @@ def main(cfg: dict):
     best_val_loss = float('inf')
     for epoch in range(1, cfg.get('epochs', 100) + 1):
         t0 = time.time()
-        train_loss, train_mse, train_reg, train_sdf = train_epoch(
+        train_loss, train_mse, train_reg, train_sdf, train_att = train_epoch(
             encoder, decoder, optimizer, train_loader, sigma, sdf_loss_weight, device,
+            contrastive=use_contrastive, lambda_attraction=lambda_attraction, delta_rep=delta_rep,
         )
-        val_loss, val_mse, val_reg, val_sdf = val_epoch(
+        val_loss, val_mse, val_reg, val_sdf, val_att = val_epoch(
             encoder, decoder, val_loader, sigma, sdf_loss_weight, device,
+            contrastive=use_contrastive, lambda_attraction=lambda_attraction, delta_rep=delta_rep,
         )
         elapsed = time.time() - t0
 
         sdf_str = f' sdf={train_sdf:.5f}|{val_sdf:.5f}' if sdf_loss_weight > 0.0 else ''
+        att_str = f' att={train_att:.5f}|{val_att:.5f}' if use_contrastive else ''
         print(
             f'Epoch {epoch:03d}/{cfg.get("epochs", 100)} | '
             f'train {train_loss:.5f} (mse={train_mse:.5f}) | '
             f'val {val_loss:.5f} (mse={val_mse:.5f}) |'
-            f'{sdf_str} {elapsed:.1f}s'
+            f'{sdf_str}{att_str} {elapsed:.1f}s'
         )
 
         writer.add_scalar('Loss/train', train_loss, epoch)
@@ -251,6 +313,9 @@ def main(cfg: dict):
         if sdf_loss_weight > 0.0:
             writer.add_scalar('Loss/train_sdf', train_sdf, epoch)
             writer.add_scalar('Loss/val_sdf', val_sdf, epoch)
+        if use_contrastive:
+            writer.add_scalar('Loss/train_att', train_att, epoch)
+            writer.add_scalar('Loss/val_att', val_att, epoch)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss

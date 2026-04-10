@@ -156,6 +156,10 @@ class PointCloudLatentDataset(Dataset):
         # Shape (1, latent_size) so PyG's Batch concatenates to (B, latent_size)
         data.latent = latent.unsqueeze(0)
 
+        # Expose the tuber label so the training loop can form contrastive pairs
+        # (mirrors corepp's fruit_id). PyG Batch collates strings as a plain list.
+        data.label = label
+
         # SDF samples — shape (1, N_sdf, 3/1) so Batch gives (B, N_sdf, 3/1)
         if self._sdf_ram is not None and label in self._sdf_ram:
             pos_t, neg_t = self._sdf_ram[label]
