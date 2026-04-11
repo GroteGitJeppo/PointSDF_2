@@ -35,10 +35,12 @@ Three main uses:
 """
 
 import argparse
+import glob
 import logging
 import os
 
 import numpy as np
+import open3d as o3d
 import pandas as pd
 import torch
 import yaml
@@ -47,6 +49,8 @@ from tqdm import tqdm
 from data.sdf_samples import resolve_samples_npz
 from models.decoder import Decoder
 from models import SDFDecoder
+from utils import get_volume_coords, sdf2mesh
+from metrics_3d.chamfer_distance import ChamferDistance
 
 MODEL_PARAMS_SUBDIR = "ModelParameters"
 LATENT_CODES_SUBDIR = "LatentCodes"
@@ -166,45 +170,65 @@ def _optimise_latent(
 
 
 # ---------------------------------------------------------------------------
-# Chamfer distance (symmetric, L2)
+# Chamfer distance — corepp-compatible
+# ---------------------------------------------------------------------------
+# Mirrors corepp/compute_reconstruction_metrics.py:
+#   - GT  = complete laser/SfM PLY, centred (matches T.Center applied to partial scans)
+#   - Pred = mesh extracted via sdf2mesh (convex hull of SDF < 0, same as test.py)
+#   - Metric = metrics_3d.ChamferDistance: (mean(gt→pred) + mean(pred→gt)) / 2
 # ---------------------------------------------------------------------------
 
-def _chamfer(pred_pts: torch.Tensor, gt_pts: torch.Tensor) -> float:
-    dists = torch.cdist(pred_pts.unsqueeze(0), gt_pts.unsqueeze(0)).squeeze(0)
-    cd = dists.min(dim=1).values.mean() + dists.min(dim=0).values.mean()
-    return cd.item()
+_cd_metric = ChamferDistance()
+
+
+def _load_gt_pcd_for_reconstruct(gt_pcd_dir: str, label: str, ply_pattern: str):
+    """Load and centre the complete laser PLY for one shape. Returns None if not found."""
+    matches = glob.glob(os.path.join(gt_pcd_dir, label, ply_pattern))
+    if not matches:
+        return None
+    pcd = o3d.io.read_point_cloud(matches[0])
+    pcd.translate(-pcd.get_center())
+    return pcd
 
 
 def _chamfer_for_latent(
     latent: torch.Tensor,
     decoder: torch.nn.Module,
-    pos_t: torch.Tensor,
-    neg_t: torch.Tensor,
     clamp_dist: float,
+    gt_pcd_dir: str,
+    label: str,
+    ply_pattern: str,
+    grid_resolution: int = 64,
 ) -> float | None:
-    """Compute Chamfer distance for a single shape given its optimised latent."""
-    all_pts = torch.cat([pos_t[:, :3], neg_t[:, :3]], dim=0)
-    if all_pts.shape[0] > 4096:
-        idx = torch.randperm(all_pts.shape[0])[:4096]
-        all_pts = all_pts[idx]
-    gt_pts = all_pts.cuda()
+    """
+    Compute corepp-compatible Chamfer distance for one shape given its latent.
 
-    grid_res = 32
+    Extracts a mesh from the SDF grid (same pipeline as test.py) and compares
+    it against the centred GT laser PLY using metrics_3d.ChamferDistance.
+    Returns None when the mesh cannot be extracted or the GT PLY is missing.
+    """
+    gt_pcd = _load_gt_pcd_for_reconstruct(gt_pcd_dir, label, ply_pattern)
+    if gt_pcd is None:
+        logging.debug("    %s: GT PLY not found, skipping Chamfer", label)
+        return None
+
     bbox = clamp_dist * 1.5
-    vals = torch.linspace(-bbox, bbox, grid_res)
-    g = torch.meshgrid(vals, vals, vals, indexing="ij")
-    grid = torch.stack([g_.ravel() for g_ in g], dim=1).cuda()
+    grid_coords = get_volume_coords(resolution=grid_resolution, bbox=bbox).cuda()
 
     with torch.no_grad():
-        lat_exp = latent.cuda().unsqueeze(0).expand(grid.shape[0], -1)
-        net_in = torch.cat([lat_exp, grid], dim=1)
-        pred_sdf = decoder(net_in).squeeze(1)
+        lat_exp = latent.cuda().unsqueeze(0).expand(grid_coords.shape[0], -1)
+        net_in = torch.cat([lat_exp, grid_coords], dim=1)
+        pred_sdf = decoder(net_in)
 
-    surface_mask = pred_sdf.abs() < (bbox / grid_res * 2)
-    surface_pts = grid[surface_mask]
-    if surface_pts.shape[0] < 4:
+    try:
+        mesh = sdf2mesh(pred_sdf, grid_coords)
+    except (ValueError, RuntimeError) as e:
+        logging.debug("    %s: mesh extraction failed: %s", label, e)
         return None
-    return _chamfer(surface_pts.float(), gt_pts.float())
+
+    _cd_metric.reset()
+    _cd_metric.update(gt_pcd, mesh)
+    return _cd_metric.compute(print_output=False)
 
 
 # ---------------------------------------------------------------------------
@@ -297,11 +321,26 @@ def _run_checkpoint(
             torch.save(latent, out_path)
 
         if compute_chamfer:
-            pos_t, neg_t = ram[label]
-            cd = _chamfer_for_latent(latent, decoder, pos_t, neg_t, clamp_dist)
-            if cd is not None:
-                chamfer_vals.append(cd)
-                logging.debug("    %s  CD=%.5f", label, cd)
+            gt_pcd_dir = cfg.get("gt_pcd_dir", None)
+            ply_pattern = cfg.get("gt_ply_pattern", "*.ply")
+            if gt_pcd_dir is None:
+                logging.warning(
+                    "gt_pcd_dir not set in config — Chamfer skipped. "
+                    "Add gt_pcd_dir to train_deepsdf.yaml to enable corepp-compatible Chamfer."
+                )
+                compute_chamfer = False
+            else:
+                cd = _chamfer_for_latent(
+                    latent=latent,
+                    decoder=decoder,
+                    clamp_dist=clamp_dist,
+                    gt_pcd_dir=gt_pcd_dir,
+                    label=label,
+                    ply_pattern=ply_pattern,
+                )
+                if cd is not None:
+                    chamfer_vals.append(cd)
+                    logging.debug("    %s  CD=%.5f", label, cd)
 
     mean_cd = float(np.mean(chamfer_vals)) if chamfer_vals else None
     return mean_cd

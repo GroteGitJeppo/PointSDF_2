@@ -69,5 +69,13 @@ snapshot_frequency: 10
 additional_snapshots: [0, 500]   # match corepp AdditionalSnapshots
 log_frequency:      10
 
+# ---- Evaluation (corepp-compatible Chamfer for E* selection) --------------
+# Directory containing one sub-folder per label, each holding the complete
+# laser/SfM PLY used as GT for Chamfer-based checkpoint selection.
+# Same source as: python data/prepare_dataset.py sdf --src <gt_pcd_dir>
+# If omitted or null, reconstruct.py falls back to its lightweight grid Chamfer.
+gt_pcd_dir:     data/3DPotatoTwin/2_sfm/4_pcd
+gt_ply_pattern: "*.ply"    # glob pattern inside each label folder
+
 # ---- Resume ------------------------------------------------
 # Use CLI: python train_deepsdf.py -c configs/train_deepsdf.yaml --continue-from latest

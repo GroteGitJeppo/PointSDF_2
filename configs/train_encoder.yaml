@@ -57,3 +57,10 @@ delta_rep:          0.5       # margin for repulsion hinge loss
 # ---- Inference / test settings -----------------------------
 grid_resolution: 64          # resolution^3 SDF query points per sample
 grid_bbox:       0.15        # half-extent of the bounding box (metres)
+
+# ---- Evaluation (corepp-compatible metrics) ----------------
+# Directory containing one sub-folder per label, each holding the
+# complete laser/SfM PLY used as GT for Chamfer and precision/recall.
+# Same source as: python data/prepare_dataset.py sdf --src <gt_pcd_dir>
+gt_pcd_dir:     data/3DPotatoTwin/2_sfm/4_pcd
+gt_ply_pattern: "*.ply"    # glob pattern inside each label folder
