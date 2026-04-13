@@ -227,7 +227,7 @@ def main(cfg: dict):
     train_ds = PointCloudLatentDataset(
         data_root=cfg['data_root'],
         splits_csv=cfg['splits_csv'],
-        latent_dir=cfg['latent_dir'],
+        latent_dir=os.path.join(cfg['latent_dir'], 'train'),
         split='train',
         num_points=cfg.get('num_points', 1024),
         apply_augmentation=True,
@@ -238,7 +238,7 @@ def main(cfg: dict):
     val_ds = PointCloudLatentDataset(
         data_root=cfg['data_root'],
         splits_csv=cfg['splits_csv'],
-        latent_dir=cfg['latent_dir'],
+        latent_dir=os.path.join(cfg['latent_dir'], 'val'),
         split='val',
         num_points=cfg.get('num_points', 1024),
         apply_augmentation=False,
