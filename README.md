@@ -211,7 +211,7 @@ The script prints exactly which path to put in the Stage 2 config, e.g.:
 
 ```
 To use as Stage 2 targets, set in configs/train_encoder.yaml:
-  latent_dir: weights/deepsdf/<run>/Reconstructions/<E*>/Codes/train
+  latent_dir: weights/deepsdf/<run>/Reconstructions/<E*>/Codes
 ```
 
 ---
@@ -269,6 +269,8 @@ tensorboard --logdir weights/encoder/<run>
 
 **What it does:** Loads an encoder + decoder checkpoint, runs the full pipeline on every test-split potato (encode → decode SDF on a 64³ grid → convex hull → volume in mL), then compares predicted volumes to ground-truth volumes.
 
+**Inference timing (corepp-comparable):** `exec_time_ms` in the CSV is encoder → decoder → mesh/volume only (not PLY load or Chamfer/P&R). The printed **Avg exec** is the mean of those times **excluding the first test sample** (CUDA warmup), matching corepp’s test script.
+
 ```bash
 python test.py \
     --config     configs/train_encoder.yaml \
@@ -286,8 +288,8 @@ Test results (49/51 with valid meshes):
   MAE volume:  18.4 mL
   RMSE volume: 22.6 mL
   R²:          0.912
-  Chamfer dist: 2.8 mm  (if sdf_data_dir is set in decoder config)
-  Avg exec:    9.9 ms
+  Chamfer dist: 2.8 mm  (if gt_pcd_dir is set in the encoder config)
+  Avg exec:    9.9 ms  (mean excludes first sample; see note above)
 
 === Per cultivar ===
   Corolle:  n=9  | MAE=17.6 mL | R²=0.934

@@ -11,6 +11,13 @@ Metrics match corepp/test.py exactly:
   - Precision/Recall/F1: percentage of points within 5 mm (0.005 m) threshold
   - GT: complete laser/SfM PLY per tuber, centred to match encoder pre-transform
 
+Timing (corepp-comparable):
+  - exec_time_ms per row: encoder → decoder (full SDF grid) → convex-hull mesh /
+    volume only. Excludes PLY load + FPS (process_ply) and excludes Chamfer / P&R.
+    corepp's test.py also times latent disk writes; we do not.
+  - Printed "Avg exec" is the mean of exec_time_ms over all samples except the
+    first (CUDA / graph warmup), matching corepp's skip of the first iteration.
+
 Usage:
     python test.py --config configs/train_encoder.yaml --checkpoint weights/encoder/<run>/checkpoint.pth
 """
@@ -161,9 +168,9 @@ def main(cfg: dict, checkpoint_path: str):
 
             gt_volume = float(gt_df.loc[unique_id, volume_col])
 
-            t0 = timeit.default_timer()
-
             data = process_ply(ply_file, num_points, pre_transform, device)
+
+            t0 = timeit.default_timer()
             latent = encoder(data)                          # (1, latent_size)
 
             latent_tiled = latent.expand(grid_coords.size(0), -1)
@@ -183,6 +190,8 @@ def main(cfg: dict, checkpoint_path: str):
                     pred_volume = round(mesh.get_volume() * 1e6, 2)  # m³ → mL
             except (ValueError, RuntimeError) as e:
                 print(f'  Mesh extraction failed for {unique_id}: {e}')
+
+            elapsed_ms = (timeit.default_timer() - t0) * 1e3
 
             # corepp-compatible shape metrics: GT = centred complete scan PLY
             if compute_shape_metrics and mesh is not None:
@@ -211,7 +220,6 @@ def main(cfg: dict, checkpoint_path: str):
                 except Exception as e:
                     print(f'  Shape metrics failed for {unique_id}: {e}')
 
-            elapsed_ms = (timeit.default_timer() - t0) * 1e3
             exec_times.append(elapsed_ms)
 
             cultivar = gt_df.loc[unique_id, 'cultivar'] if 'cultivar' in gt_df.columns else ''
@@ -247,7 +255,20 @@ def main(cfg: dict, checkpoint_path: str):
         print(f'  Precision@5mm: {np.mean(prec_values):.1f}%')
         print(f'  Recall@5mm:    {np.mean(rec_values):.1f}%')
         print(f'  F1@5mm:        {np.mean(f1_values):.1f}%')
-    print(f'  Avg exec:      {np.mean(exec_times):.1f} ms')
+    if not exec_times:
+        print('  Avg exec:      n/a (no samples timed)')
+    elif len(exec_times) > 1:
+        avg_exec = float(np.mean(exec_times[1:]))
+        print(
+            f'  Avg exec:      {avg_exec:.1f} ms  '
+            f'(corepp-style inference mean, first sample excluded from mean; n={len(exec_times) - 1})'
+        )
+    else:
+        avg_exec = float(np.mean(exec_times))
+        print(
+            f'  Avg exec:      {avg_exec:.1f} ms  '
+            f'(single sample; no first-sample warmup exclusion)'
+        )
 
     def _shape_str(sel):
         cd_vals = sel['chamfer_mm'].dropna()
