@@ -12,11 +12,11 @@ Metrics match corepp/test.py exactly:
   - GT: complete laser/SfM PLY per tuber, centred to match encoder pre-transform
 
 Timing (corepp-comparable):
-  - exec_time_ms per row: encoder → decoder (full SDF grid) → convex-hull mesh /
-    volume only. Excludes PLY load + FPS (process_ply) and excludes Chamfer / P&R.
-    corepp's test.py also times latent disk writes; we do not.
-  - Printed "Avg exec" is the mean of exec_time_ms over all samples except the
-    first (CUDA / graph warmup), matching corepp's skip of the first iteration.
+  - exec_time_ms per row: encoder → save latent to ``<latent_dir>/test/<ply_stem>.pth`` →
+    decoder (full SDF grid) → convex-hull mesh / volume. Excludes PLY load + FPS
+    (process_ply) and excludes Chamfer / P&R.
+  - Printed "Avg exec" stats exclude the first sample (CUDA / graph warmup), matching
+    corepp's skip of the first iteration.
 
 Usage:
     python test.py --config configs/train_encoder.yaml --checkpoint weights/encoder/<run>/checkpoint.pth
@@ -145,6 +145,16 @@ def main(cfg: dict, checkpoint_path: str):
     cd_metric = ChamferDistance()
     pr_metric = PrecisionRecall(0.001, 0.01, 10)
 
+    latent_dir = cfg.get('latent_dir')
+    if not latent_dir:
+        raise ValueError(
+            "test.py requires 'latent_dir' in the encoder config (same base as train/val "
+            "Codes). Latents are written to <latent_dir>/test/<ply_stem>.pth"
+        )
+    latent_test_dir = os.path.join(latent_dir, 'test')
+    os.makedirs(latent_test_dir, exist_ok=True)
+    print(f'Encoder latents will be saved under {latent_test_dir}')
+
     # ----- Output columns -----
     columns = [
         'file_name', 'unique_id', 'cultivar', 'growing_season',
@@ -172,6 +182,12 @@ def main(cfg: dict, checkpoint_path: str):
 
             t0 = timeit.default_timer()
             latent = encoder(data)                          # (1, latent_size)
+
+            # Per-scan latent on disk — same placement as corepp/test.py (after encoder,
+            # before grid decode); included in exec_time_ms.
+            latent_save = latent.detach().cpu().squeeze()
+            stem = Path(ply_file).stem
+            torch.save(latent_save, os.path.join(latent_test_dir, f'{stem}.pth'))
 
             latent_tiled = latent.expand(grid_coords.size(0), -1)
             decoder_input = torch.cat([latent_tiled, grid_coords], dim=1)

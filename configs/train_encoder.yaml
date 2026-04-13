@@ -14,6 +14,7 @@ metadata_csv:  data/3DPotatoTwin/ground_truth.csv   # optional: provides cultiva
 # Run: python reconstruct.py -c configs/train_deepsdf.yaml \
 #          --experiment_dir weights/deepsdf/<run> --checkpoint <E*> --split train
 # Each file: <latent_dir>/<label>.pth  (single tensor of shape latent_size)
+# test.py also writes encoder latents per scan: <latent_dir>/test/<stem>.pth
 latent_dir: weights/deepsdf/11_04_024936/Reconstructions/380/Codes
 
 # ---- Stage 1 decoder (frozen) ------------------------------
