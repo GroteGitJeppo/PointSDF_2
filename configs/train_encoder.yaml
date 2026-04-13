@@ -14,12 +14,12 @@ metadata_csv:  data/3DPotatoTwin/ground_truth.csv   # optional: provides cultiva
 # Run: python reconstruct.py -c configs/train_deepsdf.yaml \
 #          --experiment_dir weights/deepsdf/<run> --checkpoint <E*> --split train
 # Each file: <latent_dir>/<label>.pth  (single tensor of shape latent_size)
-latent_dir: weights/deepsdf/<run>/Reconstructions/<E*>/Codes/train
+latent_dir: weights/deepsdf/11_04_024936/Reconstructions/380/Codes/train
 
 # ---- Stage 1 decoder (frozen) ------------------------------
 # Path to the best Stage 1 ModelParameters checkpoint (e.g. 500.pth).
 # Use the epoch E* selected by Chamfer distance on the val split via reconstruct.py.
-decoder_weights: weights/deepsdf/<run>/ModelParameters/<E*>.pth
+decoder_weights: weights/deepsdf/11_04_024936/ModelParameters/380.pth
 # Path to the Stage 1 config (used to read architecture params)
 decoder_config:  configs/train_deepsdf.yaml
 
