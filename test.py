@@ -258,16 +258,12 @@ def main(cfg: dict, checkpoint_path: str):
     if not exec_times:
         print('  Avg exec:      n/a (no samples timed)')
     elif len(exec_times) > 1:
-        avg_exec = float(np.mean(exec_times[1:]))
+        mean_exec = float(np.mean(exec_times[1:]))
+        median_exec = float(np.median(exec_times[1:]))
         print(
-            f'  Avg exec:      {avg_exec:.1f} ms  '
-            f'(corepp-style inference mean, first sample excluded from mean; n={len(exec_times) - 1})'
-        )
-    else:
-        avg_exec = float(np.mean(exec_times))
-        print(
-            f'  Avg exec:      {avg_exec:.1f} ms  '
-            f'(single sample; no first-sample warmup exclusion)'
+            f'  Median exec:   {median_exec:.1f} ms  '
+            f'  Avg exec:      {mean_exec:.1f} ms  (dismissed in favor of median)'
+
         )
 
     def _shape_str(sel):
