@@ -53,6 +53,8 @@ Key dependencies: Python 3.12.3, PyTorch 2.8.0 (CUDA 12.8), PyTorch Geometric 2.
 
 The [3DPotatoTwin](https://huggingface.co/datasets/UTokyo-FieldPhenomics-Lab/3DPotatoTwin) dataset provides partial point clouds, SfM meshes, and ground-truth volumes.
 
+Ground-truth mesh traits used by the encoder config (`target_csv`) live in `data/3DPotatoTwin/mesh_traits.csv`, built by merging `mesh_traits_2023.csv` and `mesh_traits_2025.csv` with a `year` column (`python data/merge_mesh_traits.py`); the per-year CSVs stay unchanged as sources.
+
 **All commands below are run from inside `PointSDF_2/`.**
 
 ### Step 0a — Generate SDF samples from complete meshes (Stage 1 input)

@@ -10,6 +10,7 @@ Metrics match corepp/test.py exactly:
   - Chamfer: Open3D point-cloud distance, (mean(gt→pred) + mean(pred→gt)) / 2
   - Precision/Recall/F1: percentage of points within 5 mm (0.005 m) threshold
   - GT: complete laser/SfM PLY per tuber, centred to match encoder pre-transform
+  - Per-label ``year`` (from ``target_csv``, e.g. mesh_traits) is printed in the per-year summary
 
 Timing (corepp-comparable):
   - exec_time_ms per row: encoder → save latent to ``<latent_dir>/test/<ply_stem>.pth`` →
@@ -157,7 +158,7 @@ def main(cfg: dict, checkpoint_path: str):
 
     # ----- Output columns -----
     columns = [
-        'file_name', 'unique_id', 'cultivar', 'growing_season',
+        'file_name', 'unique_id', 'cultivar', 'growing_season', 'year',
         'gt_volume_ml', 'pred_volume_ml',
         'chamfer_mm', 'precision', 'recall', 'f1',
         'exec_time_ms',
@@ -240,12 +241,21 @@ def main(cfg: dict, checkpoint_path: str):
 
             cultivar = gt_df.loc[unique_id, 'cultivar'] if 'cultivar' in gt_df.columns else ''
             season = gt_df.loc[unique_id, 'growing_season'] if 'growing_season' in gt_df.columns else ''
+            year_val = np.nan
+            if 'year' in gt_df.columns:
+                yv = gt_df.loc[unique_id, 'year']
+                if pd.notna(yv):
+                    try:
+                        year_val = int(float(yv))
+                    except (TypeError, ValueError):
+                        year_val = yv
 
             rows.append({
                 'file_name': ply_file,
                 'unique_id': unique_id,
                 'cultivar': cultivar,
                 'growing_season': season,
+                'year': year_val,
                 'gt_volume_ml': gt_volume,
                 'pred_volume_ml': pred_volume,
                 'chamfer_mm': chamfer_mm,
@@ -304,13 +314,18 @@ def main(cfg: dict, checkpoint_path: str):
                 f'{_shape_str(sel)}'
             )
 
-    # Per-season breakdown
-    if 'growing_season' in df_out.columns and df_out['growing_season'].notna().any():
-        print('\n=== Per growing season ===')
-        for season in valid['growing_season'].unique():
-            sel = valid[valid['growing_season'] == season]
+    # Per-year breakdown (mesh_traits year, e.g. 2023 vs 2025 cohort)
+    if 'year' in df_out.columns and valid['year'].notna().any():
+        print('\n=== Per year ===')
+        for y in sorted(
+            valid['year'].dropna().unique(),
+            key=lambda v: (float(v) if isinstance(v, (int, float, np.integer)) else str(v)),
+        ):
+            sel = valid[valid['year'] == y]
+            if len(sel) == 0:
+                continue
             print(
-                f'  {season}: n={len(sel)} | '
+                f'  {y}: n={len(sel)} | '
                 f'MAE={mean_absolute_error(sel["gt_volume_ml"], sel["pred_volume_ml"]):.2f} mL | '
                 f'R²={r2_score(sel["gt_volume_ml"], sel["pred_volume_ml"]):.3f}'
                 f'{_shape_str(sel)}'

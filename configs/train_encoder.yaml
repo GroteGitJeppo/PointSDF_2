@@ -6,7 +6,7 @@
 # ---- Data (server paths) -----------------------------------
 data_root:  data/3DPotatoTwin/1_rgbd/2_pcd
 splits_csv: data/3DPotatoTwin/splits.csv
-target_csv:    data/3DPotatoTwin/mesh_traits_2023.csv
+target_csv:    data/3DPotatoTwin/mesh_traits.csv
 volume_column: "volume (cm3)"     # column in target_csv that holds ground-truth volume (cm³ = mL)
 metadata_csv:  data/3DPotatoTwin/ground_truth.csv   # optional: provides cultivar / growing_season columns
 
@@ -56,7 +56,7 @@ lambda_attraction:  0.05      # weight applied to AttRepLoss (matches corepp sup
 delta_rep:          0.5       # margin for repulsion hinge loss
 
 # ---- Inference / test settings -----------------------------
-grid_resolution: 32          # resolution^3 SDF query points per sample
+grid_resolution: 64          # resolution^3 SDF query points per sample
 grid_bbox:       0.15        # half-extent of the bounding box (metres)
 
 # ---- Evaluation (corepp-compatible metrics) ----------------
