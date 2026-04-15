@@ -31,7 +31,7 @@ output_dir: weights/encoder
 
 # ---- Encoder training --------------------------------------
 seed:              133
-epochs:            500
+epochs:            100
 batch_size:        16
 num_points:        1024
 lr:                0.0001
