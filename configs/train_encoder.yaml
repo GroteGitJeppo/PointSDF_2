@@ -1,6 +1,8 @@
 # ============================================================
 # Stage 2 config: PointNet++ encoder training
 # Update the paths below to match your server layout.
+# 2025 remains strict blind test-only: do not use test metrics
+# for model or hyperparameter selection.
 # ============================================================
 
 # ---- Data (server paths) -----------------------------------
@@ -37,6 +39,31 @@ weight_decay:      0.000001
 lr_gamma:          0.995     # ExponentialLR gamma per epoch (0.995^500 ≈ 0.082 — stays usable)
 sigma_regulariser: 0.01      # weight of the latent L2 regulariser
 snapshot_frequency: 10       # save a checkpoint every N epochs for post-hoc volume-RMSE selection
+
+# ---- Augmentation (train split only) ------------------------
+# Targets viewpoint/camera-distance robustness while preserving geometry.
+augmentation:
+  jitter_std:          0.0015
+  jitter_clip:         0.003
+  rotate_x_deg:        8.0
+  rotate_y_deg:        8.0
+  rotate_z_deg:        180.0
+  flip_x_prob:         0.5
+  scale_min:           0.9
+  scale_max:           1.1
+  point_dropout_prob:  0.5
+  point_dropout_min:   0.05
+  point_dropout_max:   0.20
+  occlusion_prob:      0.3
+  occlusion_ratio_min: 0.05
+  occlusion_ratio_max: 0.15
+
+# ---- Sampler (train split only) -----------------------------
+sampler:
+  enabled: true
+  trait_column: "volume (cm3)"   # from target_csv
+  num_bins: 4                     # quantile bins for inverse-frequency weights
+  balance_cultivar: false         # if true, balances by bin x cultivar group
 
 # ---- End-to-end SDF loss (Stage 2) -------------------------
 # Set sdf_data_dir to the same path used in Stage 1 to enable an additional

@@ -1,12 +1,12 @@
 import os
 from pathlib import Path
 
+import math
 import numpy as np
 import open3d as o3d
 import pandas as pd
 import torch
 import torch_fpsample
-import torch_geometric.transforms as T
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
 
@@ -47,6 +47,7 @@ class PointCloudLatentDataset(Dataset):
         split: str = 'train',
         num_points: int = 1024,
         apply_augmentation: bool = True,
+        augmentation_cfg: dict | None = None,
         sdf_data_dir: str | None = None,
         sdf_samples_per_shape: int = 1024,
         sdf_clamp_value: float | None = None,
@@ -54,20 +55,9 @@ class PointCloudLatentDataset(Dataset):
         self.latent_dir = latent_dir
         self.num_points = num_points
         self.apply_augmentation = apply_augmentation
-        self.pre_transform = T.Center()
         self._sdf_samples_per_shape = sdf_samples_per_shape
         self._sdf_clamp = sdf_clamp_value
-
-        if apply_augmentation:
-            self.transform = T.Compose([
-                T.RandomJitter(0.0005),
-                T.RandomRotate(2, axis=0),    # small tilt (realistic)
-                T.RandomRotate(2, axis=1),    # small tilt (realistic)
-                T.RandomRotate(90, axis=2),   # full yaw — unconstrained on conveyor belt
-                T.RandomFlip(axis=0, p=0.5),  # left-right flip — physically plausible
-            ])
-        else:
-            self.transform = None
+        self.augmentation_cfg = self._parse_augmentation_cfg(augmentation_cfg)
 
         splits_df = pd.read_csv(splits_csv)
         labels = set(splits_df[splits_df['split'] == split]['label'].astype(str))
@@ -131,6 +121,144 @@ class PointCloudLatentDataset(Dataset):
 
     # ------------------------------------------------------------------
 
+    def _parse_augmentation_cfg(self, cfg: dict | None) -> dict:
+        # Backward-compatible defaults approximate previous behaviour.
+        defaults = {
+            "jitter_std": 5e-4,
+            "jitter_clip": 1e-3,
+            "rotate_x_deg": 2.0,
+            "rotate_y_deg": 2.0,
+            "rotate_z_deg": 90.0,
+            "flip_x_prob": 0.5,
+            "scale_min": 1.0,
+            "scale_max": 1.0,
+            "point_dropout_prob": 0.0,
+            "point_dropout_min": 0.0,
+            "point_dropout_max": 0.0,
+            "occlusion_prob": 0.0,
+            "occlusion_ratio_min": 0.0,
+            "occlusion_ratio_max": 0.0,
+        }
+        if cfg is None:
+            return defaults
+        out = defaults.copy()
+        out.update(cfg)
+        return out
+
+    def _center_points(self, points: torch.Tensor) -> torch.Tensor:
+        center = points.mean(dim=0, keepdim=True)
+        return points - center
+
+    def _enforce_num_points(self, points: torch.Tensor) -> torch.Tensor:
+        n = points.size(0)
+        if n == self.num_points:
+            return points
+        if n > self.num_points:
+            sampled, _ = torch_fpsample.sample(points, self.num_points)
+            return sampled
+        if n == 0:
+            return torch.zeros((self.num_points, 3), dtype=torch.float32)
+        extra_idx = torch.randint(0, n, (self.num_points - n,))
+        extras = points[extra_idx]
+        return torch.cat([points, extras], dim=0)
+
+    @staticmethod
+    def _rotation_matrix_xyz(rx: float, ry: float, rz: float) -> torch.Tensor:
+        cx, sx = math.cos(rx), math.sin(rx)
+        cy, sy = math.cos(ry), math.sin(ry)
+        cz, sz = math.cos(rz), math.sin(rz)
+        rot_x = torch.tensor([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]])
+        rot_y = torch.tensor([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]])
+        rot_z = torch.tensor([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
+        return rot_z @ rot_y @ rot_x
+
+    def _dropout_points(self, points: torch.Tensor, drop_ratio: float) -> torch.Tensor:
+        n = points.size(0)
+        if n < 2 or drop_ratio <= 0.0:
+            return points
+        drop_n = int(n * drop_ratio)
+        if drop_n <= 0:
+            return points
+        keep_n = max(n - drop_n, 1)
+        keep_idx = torch.randperm(n)[:keep_n]
+        kept = points[keep_idx]
+        if keep_n == n:
+            return kept
+        refill_idx = torch.randint(0, keep_n, (n - keep_n,))
+        refill = kept[refill_idx]
+        return torch.cat([kept, refill], dim=0)
+
+    def _occlude_points(self, points: torch.Tensor, occ_ratio: float) -> torch.Tensor:
+        n = points.size(0)
+        if n < 2 or occ_ratio <= 0.0:
+            return points
+        occ_n = int(n * occ_ratio)
+        if occ_n <= 0:
+            return points
+        center_idx = torch.randint(0, n, (1,)).item()
+        center = points[center_idx : center_idx + 1]
+        dist = ((points - center) ** 2).sum(dim=1)
+        remove_idx = torch.topk(dist, k=min(occ_n, n - 1), largest=False).indices
+        keep_mask = torch.ones(n, dtype=torch.bool)
+        keep_mask[remove_idx] = False
+        kept = points[keep_mask]
+        keep_n = kept.size(0)
+        refill_idx = torch.randint(0, keep_n, (n - keep_n,))
+        refill = kept[refill_idx]
+        return torch.cat([kept, refill], dim=0)
+
+    def _augment_points(self, points: torch.Tensor) -> torch.Tensor:
+        cfg = self.augmentation_cfg
+
+        # Random rotations in degrees around xyz.
+        rx = math.radians(np.random.uniform(-cfg["rotate_x_deg"], cfg["rotate_x_deg"]))
+        ry = math.radians(np.random.uniform(-cfg["rotate_y_deg"], cfg["rotate_y_deg"]))
+        rz = math.radians(np.random.uniform(-cfg["rotate_z_deg"], cfg["rotate_z_deg"]))
+        rot = self._rotation_matrix_xyz(rx, ry, rz).to(points.dtype)
+        points = points @ rot.T
+
+        # Left-right flip around x (physically plausible for conveyor setup).
+        if np.random.rand() < float(cfg["flip_x_prob"]):
+            points[:, 0] = -points[:, 0]
+
+        # Isotropic scaling.
+        s_min = float(cfg["scale_min"])
+        s_max = float(cfg["scale_max"])
+        if s_max < s_min:
+            s_min, s_max = s_max, s_min
+        if s_max > 0:
+            scale = float(np.random.uniform(s_min, s_max))
+            points = points * scale
+
+        # Gaussian jitter with clipping.
+        std = float(cfg["jitter_std"])
+        if std > 0.0:
+            noise = torch.randn_like(points) * std
+            clip = float(cfg["jitter_clip"])
+            if clip > 0.0:
+                noise = torch.clamp(noise, -clip, clip)
+            points = points + noise
+
+        # Random point dropout.
+        if np.random.rand() < float(cfg["point_dropout_prob"]):
+            dr_min = float(cfg["point_dropout_min"])
+            dr_max = float(cfg["point_dropout_max"])
+            if dr_max < dr_min:
+                dr_min, dr_max = dr_max, dr_min
+            drop_ratio = float(np.random.uniform(dr_min, dr_max))
+            points = self._dropout_points(points, max(0.0, min(drop_ratio, 0.95)))
+
+        # Occlusion-like local removal/refill.
+        if np.random.rand() < float(cfg["occlusion_prob"]):
+            or_min = float(cfg["occlusion_ratio_min"])
+            or_max = float(cfg["occlusion_ratio_max"])
+            if or_max < or_min:
+                or_min, or_max = or_max, or_min
+            occ_ratio = float(np.random.uniform(or_min, or_max))
+            points = self._occlude_points(points, max(0.0, min(occ_ratio, 0.95)))
+
+        return points
+
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -139,18 +267,11 @@ class PointCloudLatentDataset(Dataset):
 
         pcd = o3d.io.read_point_cloud(ply_path)
         points = torch.tensor(np.asarray(pcd.points), dtype=torch.float)
-
+        points = self._center_points(points)
+        points = self._enforce_num_points(points)
+        if self.apply_augmentation:
+            points = self._augment_points(points)
         data = Data(pos=points)
-        data = self.pre_transform(data)
-        points = data.pos
-
-        if points.size(0) > self.num_points:
-            points, _ = torch_fpsample.sample(points, self.num_points)
-
-        data = Data(pos=points)
-
-        if self.apply_augmentation and self.transform is not None:
-            data = self.transform(data)
 
         latent = torch.load(latent_path, weights_only=True, map_location='cpu').detach()  # (latent_size,)
         # Shape (1, latent_size) so PyG's Batch concatenates to (B, latent_size)
