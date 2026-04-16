@@ -84,8 +84,18 @@ lambda_attraction:  0.05      # weight applied to AttRepLoss (matches corepp sup
 delta_rep:          0.5       # margin for repulsion hinge loss
 
 # ---- Inference / test settings -----------------------------
-grid_resolution: 30          # resolution^3 SDF query points per sample
+grid_resolution: 30          # resolution^3 SDF query points per sample (uniform mode only)
 grid_bbox:       0.15        # half-extent of the bounding box (metres)
+#
+# Optional hierarchical decode (test.py): coarse grid + surface cells + fine
+# samples inside dilated cells. When hierarchical_decode is true, grid_resolution
+# is not used; effective fine lattice is R_fine = (coarse_resolution-1)*fine_subdiv+1.
+hierarchical_decode: true
+coarse_resolution: 16
+fine_subdiv: 4
+surface_dilation: 1
+max_fine_queries: null
+hierarchical_decode_chunk: 131072
 
 # ---- Evaluation (corepp-compatible metrics) ----------------
 # Directory containing one sub-folder per label, each holding the

@@ -14,8 +14,9 @@ Metrics match corepp/test.py exactly:
 
 Timing (corepp-comparable):
   - exec_time_ms per row: encoder → save latent to ``<latent_dir>/test/<ply_stem>.pth`` →
-    decoder (full SDF grid) → convex-hull mesh / volume. Excludes PLY load + FPS
-    (process_ply) and excludes Chamfer / P&R.
+    decoder (uniform SDF grid or optional hierarchical coarse-to-fine decode) →
+    convex-hull mesh / volume. Excludes PLY load + FPS
+    (process_ply) and excludes Chamfer / P&R (those dominate wall time when enabled).
   - Printed "Avg exec" stats exclude the first sample (CUDA / graph warmup), matching
     corepp's skip of the first iteration.
 
@@ -43,7 +44,7 @@ from torch_geometric.typing import WITH_TORCH_CLUSTER
 from tqdm import tqdm
 
 from models import PointNetEncoder, SDFDecoder
-from utils import get_volume_coords, sdf2mesh
+from utils import decode_sdf_hierarchical, get_volume_coords, sdf2mesh
 from metrics_3d.chamfer_distance import ChamferDistance
 from metrics_3d.precision_recall import PrecisionRecall
 
@@ -80,6 +81,31 @@ def _load_gt_pcd(gt_pcd_dir: str, unique_id: str, ply_pattern: str):
     pcd = o3d.io.read_point_cloud(matches[0])
     pcd.translate(-pcd.get_center())
     return pcd
+
+
+def _chamfer_and_pr_one_pass(gt_pcd, mesh, cd_metric: ChamferDistance, pr_metric: PrecisionRecall):
+    """
+    Same semantics as separate ChamferDistance.update + PrecisionRecall.update +
+    compute_at_threshold(0.005), but one mesh→point cloud conversion (1M samples)
+    and one pair of Open3D distance computations instead of two copies.
+    """
+    if cd_metric.prediction_is_empty(mesh):
+        return 1000.0, 0.0, 0.0, 0.0
+
+    gt_conv = cd_metric.convert_to_pcd(gt_pcd)
+    pred_conv = cd_metric.convert_to_pcd(mesh)
+    dist_pt_2_gt = np.asarray(pred_conv.compute_point_cloud_distance(gt_conv))
+    dist_gt_2_pt = np.asarray(gt_conv.compute_point_cloud_distance(pred_conv))
+    chamfer_m = (float(np.mean(dist_gt_2_pt)) + float(np.mean(dist_pt_2_gt))) / 2.0
+
+    t = pr_metric.find_nearest_threshold(0.005)
+    p = 100.0 / len(dist_pt_2_gt) * int(np.sum(dist_pt_2_gt < t))
+    r = 100.0 / len(dist_gt_2_pt) * int(np.sum(dist_gt_2_pt < t))
+    if p == 0 or r == 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * p * r / (p + r)
+    return chamfer_m, p, r, f1
 
 
 def main(cfg: dict, checkpoint_path: str):
@@ -130,8 +156,24 @@ def main(cfg: dict, checkpoint_path: str):
     grid_resolution = cfg.get('grid_resolution', 64)
     grid_bbox = cfg.get('grid_bbox', 0.15)
 
-    # Pre-compute grid coords (shared across all test samples)
-    grid_coords = get_volume_coords(resolution=grid_resolution, bbox=grid_bbox).to(device)
+    hierarchical_decode = bool(cfg.get('hierarchical_decode', False))
+    coarse_resolution = int(cfg.get('coarse_resolution', 16))
+    fine_subdiv = int(cfg.get('fine_subdiv', 4))
+    surface_dilation = int(cfg.get('surface_dilation', 1))
+    max_fine_queries = cfg.get('max_fine_queries', None)
+    if max_fine_queries is not None:
+        max_fine_queries = int(max_fine_queries)
+    decode_chunk = int(cfg.get('hierarchical_decode_chunk', 131072))
+
+    if hierarchical_decode:
+        R_fine = (coarse_resolution - 1) * fine_subdiv + 1
+        print(
+            f'Hierarchical SDF decode: R_coarse={coarse_resolution}, subdiv={fine_subdiv}, '
+            f'dilation={surface_dilation} → embedded R_fine={R_fine} (grid_resolution={grid_resolution} unused)'
+        )
+        grid_coords = None
+    else:
+        grid_coords = get_volume_coords(resolution=grid_resolution, bbox=grid_bbox).to(device)
 
     # GT point clouds for corepp-compatible Chamfer / P&R
     gt_pcd_dir = cfg.get('gt_pcd_dir', None)
@@ -155,6 +197,9 @@ def main(cfg: dict, checkpoint_path: str):
     latent_test_dir = os.path.join(latent_dir, 'test')
     os.makedirs(latent_test_dir, exist_ok=True)
     print(f'Encoder latents will be saved under {latent_test_dir}')
+
+    # One GT PLY per tuber — avoid repeated glob + disk read each test sample
+    gt_pcd_cache: dict[str, o3d.geometry.PointCloud | None] = {}
 
     # ----- Output columns -----
     columns = [
@@ -190,9 +235,24 @@ def main(cfg: dict, checkpoint_path: str):
             stem = Path(ply_file).stem
             torch.save(latent_save, os.path.join(latent_test_dir, f'{stem}.pth'))
 
-            latent_tiled = latent.expand(grid_coords.size(0), -1)
-            decoder_input = torch.cat([latent_tiled, grid_coords], dim=1)
-            pred_sdf = decoder(decoder_input)               # (N, 1)
+            if hierarchical_decode:
+                grid_coords, pred_sdf = decode_sdf_hierarchical(
+                    latent=latent,
+                    decoder=decoder,
+                    bbox=grid_bbox,
+                    R_coarse=coarse_resolution,
+                    subdiv=fine_subdiv,
+                    surface_dilation=surface_dilation,
+                    device=device,
+                    clamp_dist=None,
+                    max_fine_queries=max_fine_queries,
+                    decode_chunk=decode_chunk,
+                    warn_fn=lambda msg: print(f'  {unique_id}: {msg}'),
+                )
+            else:
+                latent_tiled = latent.expand(grid_coords.size(0), -1)
+                decoder_input = torch.cat([latent_tiled, grid_coords], dim=1)
+                pred_sdf = decoder(decoder_input)
 
             pred_volume = float('nan')
             chamfer_mm = float('nan')
@@ -213,19 +273,17 @@ def main(cfg: dict, checkpoint_path: str):
             # corepp-compatible shape metrics: GT = centred complete scan PLY
             if compute_shape_metrics and mesh is not None:
                 try:
-                    gt_pcd = _load_gt_pcd(gt_pcd_dir, unique_id, gt_ply_pattern)
+                    if unique_id not in gt_pcd_cache:
+                        gt_pcd_cache[unique_id] = _load_gt_pcd(
+                            gt_pcd_dir, unique_id, gt_ply_pattern
+                        )
+                    gt_pcd = gt_pcd_cache[unique_id]
                     if gt_pcd is not None:
-                        cd_metric.reset()
-                        cd_metric.update(gt_pcd, mesh)
-                        chamfer_m = cd_metric.compute(print_output=False)
+                        chamfer_m, prec, rec, f1 = _chamfer_and_pr_one_pass(
+                            gt_pcd, mesh, cd_metric, pr_metric
+                        )
                         chamfer_mm = round(chamfer_m * 1000, 6)
                         chamfer_values.append(chamfer_m)
-
-                        pr_metric.reset()
-                        pr_metric.update(gt_pcd, mesh)
-                        prec, rec, f1, _ = pr_metric.compute_at_threshold(
-                            0.005, print_output=False
-                        )
                         prec = round(prec, 1)
                         rec = round(rec, 1)
                         f1 = round(f1, 1)
