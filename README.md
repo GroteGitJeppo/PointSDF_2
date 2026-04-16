@@ -414,6 +414,12 @@ PointSDF_2/
 | `snapshot_frequency` | `10`                             | Save a snapshot every N epochs for post-hoc best-checkpoint selection          |
 | `grid_resolution`    | `64`                             | SDF query grid resolution for inference (64³ = 262 144 points)                 |
 | `grid_bbox`          | `0.15`                           | Half-size of the query bounding box in metres (±0.15 m cube)                   |
+| `hierarchical_decode` | `false`                         | If true, use coarse-to-fine decoder sampling instead of a full `grid_resolution`³ grid |
+| `coarse_resolution`  | `16`                             | Coarse grid vertices per axis (≥ 2); used only when `hierarchical_decode` is true |
+| `fine_subdiv`        | `4`                              | Subdivisions per coarse cell; embedded fine axis length `(coarse_resolution-1)*fine_subdiv+1` |
+| `surface_dilation`   | `1`                              | 3×3×3 binary dilations applied to the coarse surface-cell mask before fine sampling |
+| `max_fine_queries`   | *(unset)*                        | Optional hard cap on fine query count; raises if exceeded                        |
+| `hierarchical_decode_chunk` | `131072`                | Max decoder input rows per forward (memory knob)                               |
 
 
 ---

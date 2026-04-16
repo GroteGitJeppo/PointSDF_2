@@ -5,3 +5,4 @@ from .sdf_helpers import (
     sdf_autodecoder_loss_chunk,
     chamfer_distance,
 )
+from .hierarchical_decode import decode_sdf_hierarchical

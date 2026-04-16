@@ -76,6 +76,16 @@ log_frequency:      10
 # If omitted or null, reconstruct.py falls back to its lightweight grid Chamfer.
 gt_pcd_dir:     data/3DPotatoTwin/2_sfm/4_pcd
 gt_ply_pattern: "*.ply"    # glob pattern inside each label folder
+#
+# Optional: same hierarchical SDF decode as Stage 2 test.py (reconstruct.py Chamfer).
+# When hierarchical_decode is true, grid_resolution below is ignored for meshing.
+# hierarchical_decode: false
+# grid_resolution: 64
+# coarse_resolution: 16
+# fine_subdiv: 4
+# surface_dilation: 1
+# max_fine_queries: null
+# hierarchical_decode_chunk: 131072
 
 # ---- Resume ------------------------------------------------
 # Use CLI: python train_deepsdf.py -c configs/train_deepsdf.yaml --continue-from latest
