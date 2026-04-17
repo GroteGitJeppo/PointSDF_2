@@ -134,9 +134,13 @@ def decode_sdf_hierarchical(
     if act.numel() > 0:
         dv = torch.arange(subdiv + 1, device=device, dtype=torch.long)
         # Per active cell (c0,c1,c2), mark fine vertices [c*subdiv, (c+1)*subdiv] on each axis.
-        i_idx = act[:, 0:1] * subdiv + dv.view(1, -1, 1, 1)
-        j_idx = act[:, 1:2] * subdiv + dv.view(1, 1, -1, 1)
-        k_idx = act[:, 2:3] * subdiv + dv.view(1, 1, 1, -1)
+        # Use (N,1,1,1) so (N,1) does not left-pad to (1,1,N,1) and break j_idx broadcast.
+        ci = act[:, 0].view(-1, 1, 1, 1) * subdiv
+        cj = act[:, 1].view(-1, 1, 1, 1) * subdiv
+        ck = act[:, 2].view(-1, 1, 1, 1) * subdiv
+        i_idx = ci + dv.view(1, -1, 1, 1)
+        j_idx = cj + dv.view(1, 1, -1, 1)
+        k_idx = ck + dv.view(1, 1, 1, -1)
         i_idx = i_idx.expand(-1, subdiv + 1, subdiv + 1, subdiv + 1).reshape(-1)
         j_idx = j_idx.expand(-1, subdiv + 1, subdiv + 1, subdiv + 1).reshape(-1)
         k_idx = k_idx.expand(-1, subdiv + 1, subdiv + 1, subdiv + 1).reshape(-1)
