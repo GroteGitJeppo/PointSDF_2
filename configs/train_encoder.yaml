@@ -50,8 +50,8 @@ augmentation:
   rotate_y_deg:        18.0
   rotate_z_deg:        180.0
   flip_x_prob:         0.55
-  scale_min:           0.82
-  scale_max:           1.18
+  scale_min:           0.5
+  scale_max:           2
   point_dropout_prob:  0.65
   point_dropout_min:   0.10
   point_dropout_max:   0.35
@@ -90,7 +90,7 @@ grid_bbox:       0.15        # half-extent of the bounding box (metres)
 # Optional hierarchical decode (test.py): coarse grid + surface cells + fine
 # samples inside dilated cells. When hierarchical_decode is true, grid_resolution
 # is not used; effective fine lattice is R_fine = (coarse_resolution-1)*fine_subdiv+1.
-hierarchical_decode: true
+hierarchical_decode: false
 coarse_resolution: 16
 fine_subdiv: 4
 surface_dilation: 1
