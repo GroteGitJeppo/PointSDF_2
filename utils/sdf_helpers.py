@@ -33,7 +33,7 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
     Extract a watertight mesh from SDF predictions using convex hull.
     Convex-hull mesh extraction used in this repo for volume estimation.
 
-    Strategy: keep all grid points where SDF < t (predicted interior), then
+    Strategy: keep all grid points where SDF <= t (predicted interior + surface), then
     compute the convex hull.  If the result is not watertight, iteratively
     voxel-downsample until it is.
 
@@ -50,7 +50,7 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
         RuntimeError if a watertight mesh cannot be produced
     """
     pred_sdf = pred_sdf.squeeze()
-    keep_idx = torch.lt(pred_sdf, t)
+    keep_idx = torch.le(pred_sdf, t)
     keep_points = grid_points[keep_idx].contiguous()
 
     if keep_points.shape[0] < 4:
@@ -82,7 +82,7 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
 
 
 def _clean_mesh(mesh):
-    mesh = mesh.subdivide_loop(number_of_iterations=1)
+    mesh = mesh.subdivide_loop(number_of_iterations=4)
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_triangles()
     mesh.remove_duplicated_vertices()
