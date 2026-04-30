@@ -50,18 +50,18 @@ augmentation:
   rotate_y_deg:        18.0
   rotate_z_deg:        180.0
   flip_x_prob:         0.55
-  scale_min:           0.5
-  scale_max:           2
-  point_dropout_prob:  0.65
+  scale_min:           0.9
+  scale_max:           1.1
+  point_dropout_prob:  0.0
   point_dropout_min:   0.10
-  point_dropout_max:   0.35
-  occlusion_prob:      0.45
+  point_dropout_max:   0.25
+  occlusion_prob:      0.0
   occlusion_ratio_min: 0.08
   occlusion_ratio_max: 0.28
 
 # ---- Sampler (train split only) -----------------------------
 sampler:
-  enabled: true
+  enabled: false
   trait_column: "volume (cm3)"   # from target_csv
   num_bins: 4                     # quantile bins for inverse-frequency weights
   balance_cultivar: false         # if true, balances by bin x cultivar group
