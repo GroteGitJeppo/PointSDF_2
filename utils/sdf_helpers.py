@@ -82,7 +82,7 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
 
 
 def _clean_mesh(mesh):
-    mesh = mesh.subdivide_loop(number_of_iterations=4)
+    mesh = mesh.subdivide_loop(number_of_iterations=0)
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_triangles()
     mesh.remove_duplicated_vertices()
