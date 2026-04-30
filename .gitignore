@@ -216,5 +216,5 @@ data/3DPotatoTwin/readme.md
 misc/architecture_optuna.py
 misc/input_points_optuna.py
 
-misc/results/
-misc/reviewdata/
+misc/results
+misc/reviewdata
