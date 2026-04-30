@@ -215,5 +215,6 @@ data/3DPotatoTwin/3_pair
 data/3DPotatoTwin/readme.md
 misc/architecture_optuna.py
 misc/input_points_optuna.py
-results/pointraft.csv
-results/linear_regression.csv
+
+misc/results
+misc/reviewdata
