@@ -331,6 +331,7 @@ def main_function(cfg, continue_from, batch_split):
         split=stage_splits,
         samples_per_scene=num_samp_per_scene,
         clamp_value=clamp_val,
+        augmented_sdf_data_dir=cfg.get("augmented_sdf_data_dir", None),
     )
 
     num_scenes = len(sdf_dataset)
@@ -541,15 +542,25 @@ def main_function(cfg, continue_from, batch_split):
             elapsed,
         )
 
-    # Per-label tensors for Stage 2 (PointCloudLatentDataset / train_encoder)
+    # Per-label tensors for Stage 2 (PointCloudLatentDataset / train_encoder).
+    # Augmented shapes are excluded — Stage 2 only needs one latent per original potato.
     latent_save_dir = os.path.join(experiment_directory, "latent_codes")
     os.makedirs(latent_save_dir, exist_ok=True)
+    n_saved = 0
     for label, idx in sdf_dataset.label_to_idx.items():
+        if label in sdf_dataset.augmented_labels:
+            continue
         torch.save(
             lat_vecs.weight.data[idx].cpu(),
             os.path.join(latent_save_dir, f"{label}.pth"),
         )
-    logging.info("Per-label latents for Stage 2: %s", latent_save_dir)
+        n_saved += 1
+    logging.info(
+        "Per-label latents for Stage 2: %s (%d original shapes saved, %d augmented skipped)",
+        latent_save_dir,
+        n_saved,
+        len(sdf_dataset.augmented_labels),
+    )
 
     print("latent: \n", lat_vecs.weight)
 

@@ -11,6 +11,13 @@ description: "PointSDF_2 DeepSDF Stage 1"
 sdf_data_dir: data/3DPotatoTwin/sdfsamples/potato
 splits_csv:   data/3DPotatoTwin/splits.csv
 
+# Optional: directory of pre-generated augmented shapes (sub-folders named
+# <label>_00 … <label>_09).  Every sub-folder with a samples.npz is added to
+# the training set with its own latent code.  Augmented latents are excluded
+# when saving Stage 2 targets — only original-label latents are written to
+# latent_codes/.  Set to null (or omit) to disable.
+augmented_sdf_data_dir: data/3DPotatoTwin/sdfsamples/potato_augmented
+
 # Labels from the train split only (matching corepp: val used only for checkpoint selection).
 stage1_splits: [train]
 
