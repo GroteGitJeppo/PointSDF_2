@@ -61,9 +61,9 @@ augmentation:
 
 # ---- Sampler (train split only) -----------------------------
 sampler:
-  enabled: false
+  enabled: true
   trait_column: "volume (cm3)"   # from target_csv
-  num_bins: 4                     # quantile bins for inverse-frequency weights
+  num_bins: 10                     # quantile bins for inverse-frequency weights
   balance_cultivar: false         # if true, balances by bin x cultivar group
 
 # ---- End-to-end SDF loss (Stage 2) -------------------------
