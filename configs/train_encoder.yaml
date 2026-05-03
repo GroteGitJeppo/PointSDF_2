@@ -36,7 +36,7 @@ batch_size:        16
 num_points:        1024
 lr:                0.0001
 weight_decay:      0.000001
-lr_gamma:          0.995     # ExponentialLR gamma per epoch (0.995^500 ≈ 0.082 — stays usable)
+lr_gamma:          0.97      # ExponentialLR gamma per epoch (0.97^100 ≈ 0.048 — matches paper)
 sigma_regulariser: 0.01      # weight of the latent L2 regulariser
 snapshot_frequency: 10       # save a checkpoint every N epochs for post-hoc volume-RMSE selection
 
