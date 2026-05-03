@@ -13,11 +13,12 @@ Metrics match corepp/test.py exactly:
   - Per-label ``year`` (from ``target_csv``, e.g. mesh_traits) is printed in the per-year summary
 
 Timing (corepp-comparable):
-  - exec_time_ms per row: encoder → save latent to ``<latent_dir>/test/<ply_stem>.pth`` →
-    decoder (uniform SDF grid or optional hierarchical coarse-to-fine decode) →
-    convex-hull mesh / volume. Excludes PLY load + FPS
-    (process_ply) and excludes Chamfer / P&R (those dominate wall time when enabled).
-  - Printed "Avg exec" stats exclude the first sample (CUDA / graph warmup), matching
+  - Per-row milliseconds with CUDA synchronization between GPU stages so splits are
+    meaningful on GPU (small overhead vs decode cost).
+  - encoder_ms, latent_save_ms, decoder_ms, convex_hull_ms segment the pipeline;
+    exec_time_ms is the wall time for that whole block (same components as before).
+  - Excludes PLY load + FPS (process_ply) and Chamfer / P&R.
+  - Printed aggregate exec stats exclude the first sample (CUDA warmup), matching
     corepp's skip of the first iteration.
 
 Usage:
@@ -52,6 +53,12 @@ warnings.filterwarnings('ignore')
 
 if not WITH_TORCH_CLUSTER:
     raise SystemExit("This code requires 'torch-cluster'")
+
+
+def _sync_cuda(device: torch.device) -> None:
+    """Wait for GPU work to finish so timers bracketing GPU sections are accurate."""
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
 
 
 def process_ply(ply_path: str, num_points: int, pre_transform, device):
@@ -206,10 +213,15 @@ def main(cfg: dict, checkpoint_path: str):
         'file_name', 'unique_id', 'cultivar', 'growing_season', 'year',
         'gt_volume_ml', 'pred_volume_ml',
         'chamfer_mm', 'precision', 'recall', 'f1',
+        'encoder_ms', 'latent_save_ms', 'decoder_ms', 'convex_hull_ms',
         'exec_time_ms',
     ]
     rows = []
     exec_times = []
+    encoder_times: list[float] = []
+    latent_save_times: list[float] = []
+    decoder_times: list[float] = []
+    hull_times: list[float] = []
     chamfer_values = []
     prec_values = []
     rec_values = []
@@ -228,13 +240,20 @@ def main(cfg: dict, checkpoint_path: str):
 
             t0 = timeit.default_timer()
             latent = encoder(data)                          # (1, latent_size)
+            _sync_cuda(device)
+            t1 = timeit.default_timer()
+            encoder_ms = (t1 - t0) * 1e3
 
             # Per-scan latent on disk — same placement as corepp/test.py (after encoder,
             # before grid decode); included in exec_time_ms.
+            t_ls0 = timeit.default_timer()
             latent_save = latent.detach().cpu().squeeze()
             stem = Path(ply_file).stem
             torch.save(latent_save, os.path.join(latent_test_dir, f'{stem}.pth'))
+            t_ls1 = timeit.default_timer()
+            latent_save_ms = (t_ls1 - t_ls0) * 1e3
 
+            t_dec0 = timeit.default_timer()
             if hierarchical_decode:
                 grid_coords, pred_sdf = decode_sdf_hierarchical(
                     latent=latent,
@@ -253,6 +272,9 @@ def main(cfg: dict, checkpoint_path: str):
                 latent_tiled = latent.expand(grid_coords.size(0), -1)
                 decoder_input = torch.cat([latent_tiled, grid_coords], dim=1)
                 pred_sdf = decoder(decoder_input)
+            _sync_cuda(device)
+            t_dec1 = timeit.default_timer()
+            decoder_ms = (t_dec1 - t_dec0) * 1e3
 
             pred_volume = float('nan')
             chamfer_mm = float('nan')
@@ -261,14 +283,18 @@ def main(cfg: dict, checkpoint_path: str):
             f1 = float('nan')
             mesh = None
 
+            t_hull0 = timeit.default_timer()
             try:
                 mesh = sdf2mesh(pred_sdf, grid_coords)
                 if mesh.is_watertight():
                     pred_volume = round(mesh.get_volume() * 1e6, 2)  # m³ → mL
             except (ValueError, RuntimeError) as e:
                 print(f'  Mesh extraction failed for {unique_id}: {e}')
+            _sync_cuda(device)
+            t_hull1 = timeit.default_timer()
+            convex_hull_ms = (t_hull1 - t_hull0) * 1e3
 
-            elapsed_ms = (timeit.default_timer() - t0) * 1e3
+            elapsed_ms = (t_hull1 - t0) * 1e3
 
             # corepp-compatible shape metrics: GT = centred complete scan PLY
             if compute_shape_metrics and mesh is not None:
@@ -296,6 +322,10 @@ def main(cfg: dict, checkpoint_path: str):
                     print(f'  Shape metrics failed for {unique_id}: {e}')
 
             exec_times.append(elapsed_ms)
+            encoder_times.append(encoder_ms)
+            latent_save_times.append(latent_save_ms)
+            decoder_times.append(decoder_ms)
+            hull_times.append(convex_hull_ms)
 
             cultivar = gt_df.loc[unique_id, 'cultivar'] if 'cultivar' in gt_df.columns else ''
             season = gt_df.loc[unique_id, 'growing_season'] if 'growing_season' in gt_df.columns else ''
@@ -320,6 +350,10 @@ def main(cfg: dict, checkpoint_path: str):
                 'precision': prec,
                 'recall': rec,
                 'f1': f1,
+                'encoder_ms': round(encoder_ms, 2),
+                'latent_save_ms': round(latent_save_ms, 2),
+                'decoder_ms': round(decoder_ms, 2),
+                'convex_hull_ms': round(convex_hull_ms, 2),
                 'exec_time_ms': round(elapsed_ms, 2),
             })
 
@@ -342,12 +376,17 @@ def main(cfg: dict, checkpoint_path: str):
     if not exec_times:
         print('  Avg exec:      n/a (no samples timed)')
     elif len(exec_times) > 1:
-        mean_exec = float(np.mean(exec_times[1:]))
-        median_exec = float(np.median(exec_times[1:]))
+        sl = slice(1, None)
+        mean_exec = float(np.mean(exec_times[sl]))
+        median_exec = float(np.median(exec_times[sl]))
         print(
-            f'  Median exec:   {median_exec:.1f} ms  '
-            f'  Avg exec:      {mean_exec:.1f} ms  (dismissed in favor of median)'
-
+            f'  Exec total (excl. 1st sample): median {median_exec:.1f} ms | mean {mean_exec:.1f} ms'
+        )
+        print(
+            f'    mean encoder {float(np.mean(encoder_times[sl])):.1f} ms | '
+            f'latent save {float(np.mean(latent_save_times[sl])):.1f} ms | '
+            f'decoder {float(np.mean(decoder_times[sl])):.1f} ms | '
+            f'convex hull {float(np.mean(hull_times[sl])):.1f} ms'
         )
 
     def _shape_str(sel):

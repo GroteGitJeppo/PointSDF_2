@@ -10,7 +10,7 @@ The approach: learn what a complete potato SDF (signed distance function) looks 
 Partial point cloud (.ply, from conveyor belt)
  │
  ▼
-PointNet++ encoder    →  latent code  z ∈ ℝ³²
+PointNet++ encoder (`models/encoder.py`)  →  latent code  z ∈ ℝ³²
  │
  ▼
 DeepSDF decoder       →  SDF value at any 3D point
@@ -247,10 +247,10 @@ No other flags are needed for a standard run.
 
 ```
 weights/encoder/<run>/
-├── encoder.pth             ← best encoder weights (lowest val loss so far)
-├── checkpoint.pth          ← full checkpoint: encoder + decoder + optimiser state
+├── encoder.pth             ← best encoder weights (lowest val *latent* MSE so far)
+├── checkpoint.pth          ← full checkpoint at last epoch (encoder + decoder + optimiser)
 ├── snapshots/
-│   ├── 0010/checkpoint.pth ← periodic snapshots every 10 epochs
+│   ├── 0010/checkpoint.pth ← periodic snapshots every N epochs (`snapshot_frequency`)
 │   ├── 0020/checkpoint.pth
 │   └── ...
 ├── config.yaml             ← copy of the config
@@ -263,7 +263,40 @@ Training logs to TensorBoard. To monitor:
 tensorboard --logdir weights/encoder/<run>
 ```
 
-**Select the best Stage 2 checkpoint:** after training, run `test.py` (Step 5) on each snapshot and pick the one with the lowest volume RMSE on the val split. `snapshot_frequency` in the config controls how often snapshots are saved.
+**Encoder implementation:** `train.py`, `test.py`, and `select_checkpoint.py` all build `PointNetEncoder` from `models/encoder.py` (exported as `PointNetEncoder` in `models/__init__.py`). Alternate files `encoder_v2.py` and `encoder_old.py` are not used by the default training path.
+
+---
+
+### Step 4b — Select the best Stage 2 checkpoint (validation volume sweep)
+
+**What it does:** The run’s `checkpoint.pth` is from the *final* epoch, which is not always best for **volume** on held-out data. `select_checkpoint.py` loads every periodic snapshot under `snapshots/`, runs the full encode → SDF grid → convex hull → volume pipeline on the **validation** split (default), ranks epochs by **volume RMSE vs `target_csv`**, and copies the winner for use with `test.py`. The test split is never used here.
+
+**Requirements:** `snapshot_frequency > 0` during training so `snapshots/<epoch>/checkpoint.pth` exist. The same `configs/train_encoder.yaml` you trained with must still point at the correct `decoder_weights`, `data_root`, `splits_csv`, `target_csv`, and `volume_column`.
+
+```bash
+python select_checkpoint.py \
+    --config configs/train_encoder.yaml \
+    --run_dir weights/encoder/<run>
+```
+
+**Optional flags:**
+
+```
+--split val              Which split to score (default: val)
+--also_best_mse          Also copy the run’s latent-MSE-best checkpoint.pth into
+                         best_vol/checkpoint_best_mse.pth for comparison
+```
+
+**Output:**
+
+```
+weights/encoder/<run>/
+├── val_volume_selection.csv   ← one row per snapshot: RMSE, MAE, R², valid/failed counts
+└── best_vol/
+    └── checkpoint.pth         ← copy of the val-RMSE-best snapshot; point test.py here
+```
+
+The script prints a ranked table and the exact `test.py --checkpoint` path to use next.
 
 ---
 
@@ -276,11 +309,13 @@ tensorboard --logdir weights/encoder/<run>
 ```bash
 python test.py \
     --config     configs/train_encoder.yaml \
-    --checkpoint weights/encoder/<run>/checkpoint.pth
+    --checkpoint weights/encoder/<run>/best_vol/checkpoint.pth
 ```
 
 ```
---checkpoint    Path to any checkpoint.pth from Stage 2 training (best model or a specific snapshot).
+--checkpoint    Path to a Stage 2 checkpoint.pth (e.g. best_vol/checkpoint.pth after
+                 select_checkpoint.py, or snapshots/<epoch>/checkpoint.pth, or the final
+                 run root checkpoint.pth).
 ```
 
 **Output — printed to console:**
@@ -328,12 +363,15 @@ python reconstruct.py -c configs/train_deepsdf.yaml \
 
 # 3. Update configs/train_encoder.yaml with latent_dir and decoder_weights paths (manual edit)
 
-# 4. Train encoder (Stage 2) — 500 epochs
+# 4. Train encoder (Stage 2)
 python train.py --config configs/train_encoder.yaml
 
-# 5. Evaluate on test set
+# 4b. Pick best encoder epoch by val volume RMSE (writes best_vol/checkpoint.pth)
+python select_checkpoint.py -c configs/train_encoder.yaml -r weights/encoder/<run>
+
+# 5. Evaluate on test set (use best_vol after step 4b, or another checkpoint path)
 python test.py --config configs/train_encoder.yaml \
-    --checkpoint weights/encoder/<run>/checkpoint.pth
+    --checkpoint weights/encoder/<run>/best_vol/checkpoint.pth
 ```
 
 ---
@@ -351,7 +389,9 @@ PointSDF_2/
 │   ├── sdf_scene_dataset.py    # Stage 1 dataset: SDF samples loaded into RAM per shape
 │   └── prepare_dataset.py      # data prep: pcd (RGB-D → PLY) and sdf (PLY → samples.npz)
 ├── models/
-│   ├── encoder.py              # PointNet++ encoder: point cloud → latent code
+│   ├── encoder.py              # PointNet++ encoder (default: train / test / select_checkpoint)
+│   ├── encoder_v2.py           # alternate encoder (not wired by default)
+│   ├── encoder_old.py          # legacy encoder (PointNetEncoderOld in __init__.py)
 │   ├── decoder.py              # DeepSDF MLP decoder: (latent, xyz) → SDF scalar
 │   └── pointsdf.py             # combined PointSDF wrapper (for inference)
 ├── utils/
@@ -361,6 +401,7 @@ PointSDF_2/
 ├── train_deepsdf.py            # Stage 1: train decoder + latent codes jointly
 ├── reconstruct.py              # Between stages: test-time latent optimisation + checkpoint selection
 ├── train.py                    # Stage 2: train encoder with frozen decoder
+├── select_checkpoint.py        # After Stage 2: sweep val split over snapshots → best_vol/
 ├── test.py                     # Evaluate encoder → decoder → volume on test split
 └── environment.yaml            # conda environment definition
 ```
@@ -432,6 +473,7 @@ PointSDF_2/
 | Two-stage training (decoder first, then encoder)      | The decoder learns a general shape space from complete SDF data; the encoder then maps partial observations into that space. Training them separately is simpler and avoids the encoder interfering with SDF learning. |
 | Test-time latent optimisation for Stage 2 targets     | After Stage 1, each training latent is further refined with the *fixed* final decoder. This gives the encoder cleaner, more consistent targets than the raw autodecoder embeddings.                                    |
 | Checkpoint selection by Chamfer distance on val split | The decoder's reconstruction quality on unseen shapes (val) peaks before the decoder memorises the training shapes. Chamfer distance on the val split is the right signal.                                             |
+| Stage 2 checkpoint selection by val volume RMSE       | Training minimises latent MSE, which need not align with hull volume error. `select_checkpoint.py` replays each saved encoder snapshot on the val split and picks the lowest volume RMSE (test split untouched).      |
 | Convex hull (not marching cubes) for volume           | Potatoes are roughly convex; convex hull is always watertight, GPU-accelerated via Open3D, and avoids marching cubes grid resolution artefacts.                                                                        |
 | Latent size 32                                        | CoRe++ systematic study found latent size 32 optimal for potato tubers, balancing shape representational capacity and generalisation.                                                                                  |
 | Decoder width 512                                     | Matches the original DeepSDF and CoRe++ configuration.                                                                                                                                                                 |
