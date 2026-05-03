@@ -6,6 +6,13 @@ import torch.utils.dlpack
 import open3d as o3d
 import open3d.core as o3c
 
+# Maximum number of interior SDF points passed to Open3D's GPU convex hull.
+# stdgpu (Open3D's internal GPU data structure) pre-allocates fixed-size buffers;
+# passing more points causes buffer overflow and silent hull corruption.
+# A convex hull depends only on extreme points, so random subsampling to this
+# limit is geometrically safe for roughly-convex shapes like potato tubers.
+MAX_HULL_POINTS = 5000
+
 
 # ---------------------------------------------------------------------------
 # Volume / mesh extraction
@@ -59,6 +66,10 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
             "convex hull requires at least 4. "
             "Try lowering the SDF threshold or increasing grid resolution."
         )
+
+    if keep_points.shape[0] > MAX_HULL_POINTS:
+        idx = torch.randperm(keep_points.shape[0], device=keep_points.device)[:MAX_HULL_POINTS]
+        keep_points = keep_points[idx].contiguous()
 
     o3d_t = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(keep_points))
     pcd_gpu = o3d.t.geometry.PointCloud(o3d_t)
