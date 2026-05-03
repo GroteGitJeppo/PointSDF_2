@@ -79,12 +79,12 @@ sdf_loss_weight:        0.1    # weight of the SDF L1 loss relative to latent MS
 # ---- Contrastive loss (AttRepLoss, matching corepp) --------
 # Attracts latents of the same tuber, repels latents of different tubers.
 # Requires each batch item to carry its label (potato tuber ID).
-contrastive_loss:   true
+contrastive_loss:   false
 lambda_attraction:  0.05      # weight applied to AttRepLoss (matches corepp super3d_32.json)
 delta_rep:          0.5       # margin for repulsion hinge loss
 
 # ---- Inference / test settings -----------------------------
-grid_resolution: 30          # resolution^3 SDF query points per sample (uniform mode only)
+grid_resolution: 60          # resolution^3 SDF query points per sample (uniform mode only)
 grid_bbox:       0.15        # half-extent of the bounding box (metres)
 #
 # Optional hierarchical decode (test.py): coarse grid + surface cells + fine
