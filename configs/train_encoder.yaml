@@ -41,6 +41,10 @@ sigma_regulariser: 0.01      # weight of the latent L2 regulariser
 snapshot_frequency: 10       # save a checkpoint every N epochs for post-hoc volume-RMSE selection
 
 # ---- Augmentation (train split only) ------------------------
+# Set augmentation_enabled: false to train without any augmentation (useful for
+# debugging or ablation studies). When false, the augmentation block below is
+# ignored entirely and point clouds are loaded as-is (centered + FPS only).
+augmentation_enabled: false
 # Aggressive but bounded: strong viewpoint + distance stress without unbounded noise.
 # If val loss diverges, reduce jitter_std / scale span / dropout_max first.
 augmentation:

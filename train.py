@@ -321,13 +321,17 @@ def main(cfg: dict):
     sdf_samples = int(cfg.get('sdf_samples_per_shape', 1024))
     sdf_clamp = cfg.get('sdf_clamp_value', None)
 
+    use_augmentation = bool(cfg.get('augmentation_enabled', True))
+    if not use_augmentation:
+        print('Augmentation disabled (augmentation_enabled: false).')
+
     train_ds = PointCloudLatentDataset(
         data_root=cfg['data_root'],
         splits_csv=cfg['splits_csv'],
         latent_dir=cfg['latent_dir'],
         split='train',
         num_points=cfg.get('num_points', 1024),
-        apply_augmentation=True,
+        apply_augmentation=use_augmentation,
         augmentation_cfg=cfg.get('augmentation', None),
         sdf_data_dir=sdf_data_dir,
         sdf_samples_per_shape=sdf_samples,
