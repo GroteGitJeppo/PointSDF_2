@@ -11,7 +11,7 @@ import open3d.core as o3c
 # passing more points causes buffer overflow and silent hull corruption.
 # A convex hull depends only on extreme points, so random subsampling to this
 # limit is geometrically safe for roughly-convex shapes like potato tubers.
-MAX_HULL_POINTS = 5000
+MAX_HULL_POINTS = 1500
 
 
 # ---------------------------------------------------------------------------
