@@ -67,14 +67,16 @@ sampler:
   balance_cultivar: false         # if true, balances by bin x cultivar group
 
 # ---- End-to-end SDF loss (Stage 2) -------------------------
-# Set sdf_data_dir to the same path used in Stage 1 to enable an additional
-# L1 SDF loss through the frozen decoder.  Leave empty / commented out to
-# train with latent MSE only (original behaviour).
+# Disabled: the SDF samples in sdf_data_dir were generated in the *centered*
+# coordinate frame (PointSDF_2 prepare_dataset.py applies pcd.translate(-centroid)),
+# but the corepp decoder was trained on *uncentered* laser scans.  Feeding
+# centered coordinates to the decoder produces wrong SDF values and corrupted
+# gradients.  Keep sdf_loss_weight at 0.0 when reusing the corepp decoder.
 #
-sdf_data_dir:           data/3DPotatoTwin/sdfsamples/potato
+# sdf_data_dir:           data/3DPotatoTwin/sdfsamples/potato
 sdf_samples_per_shape:  1024   # SDF points sampled per shape per batch step
 sdf_clamp_value:        0.1    # match Stage 1 clamp_value
-sdf_loss_weight:        0.1    # weight of the SDF L1 loss relative to latent MSE
+sdf_loss_weight:        0.0    # disabled — see note above
 
 # ---- Contrastive loss (AttRepLoss, matching corepp) --------
 # Attracts latents of the same tuber, repels latents of different tubers.
@@ -86,7 +88,24 @@ delta_rep:          0.5       # margin for repulsion hinge loss
 # ---- Inference / test settings -----------------------------
 grid_resolution: 60          # resolution^3 SDF query points per sample (uniform mode only)
 grid_bbox:       0.15        # half-extent of the bounding box (metres)
+# grid_center: the mean centroid of the complete laser scans (in the scanner
+# coordinate frame).  The corepp decoder was trained on *uncentered* scans, so
+# all potato shapes sit near this point rather than the origin.  test.py and
+# select_checkpoint.py shift the SDF query grid by this offset so the decoder
+# is evaluated at the correct spatial location.
 #
+# Run this on the server once to compute the value:
+  # python - <<'EOF'
+  # import glob, numpy as np, open3d as o3d
+  # paths = sorted(glob.glob("data/3DPotatoTwin/2_sfm/4_pcd/*/*.ply"))
+  # centroids = [np.asarray(o3d.io.read_point_cloud(p).get_center()) for p in paths]
+  # p0 = np.mean(centroids, axis=0)
+  # print(f"grid_center: [{p0[0]:.6f}, {p0[1]:.6f}, {p0[2]:.6f}]")
+  # EOF
+#
+# Then replace the placeholder below with the printed values:
+grid_center: [-0.001390, 0.001177, 0.102020]
+# grid_center: [-0.001388, 0.001177, 0.102020]
 # Optional hierarchical decode (test.py): coarse grid + surface cells + fine
 # samples inside dilated cells. When hierarchical_decode is true, grid_resolution
 # is not used; effective fine lattice is R_fine = (coarse_resolution-1)*fine_subdiv+1.

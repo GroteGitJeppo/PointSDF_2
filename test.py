@@ -172,6 +172,16 @@ def main(cfg: dict, checkpoint_path: str):
         max_fine_queries = int(max_fine_queries)
     decode_chunk = int(cfg.get('hierarchical_decode_chunk', 131072))
 
+    # grid_center shifts the SDF query grid from the origin to the position where
+    # the complete laser scans actually live in the scanner coordinate frame.
+    # Required when the decoder was trained on uncentered data (e.g. corepp weights).
+    # Compute the value once on the server with the script in train_encoder.yaml.
+    grid_center = torch.tensor(
+        cfg.get('grid_center', [0.0, 0.0, 0.0]), dtype=torch.float, device=device
+    )
+    if float(grid_center.norm()) > 1e-6:
+        print(f'SDF grid center offset: {grid_center.cpu().tolist()}')
+
     if hierarchical_decode:
         R_fine = (coarse_resolution - 1) * fine_subdiv + 1
         print(
@@ -180,7 +190,7 @@ def main(cfg: dict, checkpoint_path: str):
         )
         grid_coords = None
     else:
-        grid_coords = get_volume_coords(resolution=grid_resolution, bbox=grid_bbox).to(device)
+        grid_coords = get_volume_coords(resolution=grid_resolution, bbox=grid_bbox).to(device) + grid_center
 
     # GT point clouds for corepp-compatible Chamfer / P&R
     gt_pcd_dir = cfg.get('gt_pcd_dir', None)
@@ -288,6 +298,11 @@ def main(cfg: dict, checkpoint_path: str):
                 mesh = sdf2mesh(pred_sdf, grid_coords)
                 if mesh.is_watertight():
                     pred_volume = round(mesh.get_volume() * 1e6, 2)  # m³ → mL
+                # Translate mesh back to the origin so that Chamfer comparison
+                # with the centred GT PLY (from _load_gt_pcd) is in the same
+                # frame.  Volume is translation-invariant so it is unaffected.
+                if float(grid_center.norm()) > 1e-6:
+                    mesh.translate(-grid_center.cpu().numpy())
             except (ValueError, RuntimeError) as e:
                 print(f'  Mesh extraction failed for {unique_id}: {e}')
             _sync_cuda(device)

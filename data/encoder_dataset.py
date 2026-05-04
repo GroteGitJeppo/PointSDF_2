@@ -117,9 +117,28 @@ class PointCloudLatentDataset(Dataset):
                 f"No samples remaining for split='{split}' after SDF filtering."
             )
 
+        # Eagerly load all latent codes into RAM so __getitem__ never hits the
+        # filesystem per step (important on networked / HPC storage).
+        self.latents_dict: dict[str, torch.Tensor] = self._load_latents_dict(
+            {lbl: lp for _, lbl, lp in self.samples}
+        )
+
         print(f"PointCloudLatentDataset [{split}]: {len(self.samples)} samples")
 
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _load_latents_dict(label_to_path: dict[str, str]) -> dict[str, torch.Tensor]:
+        """Load all per-fruit latent codes into RAM once at construction time.
+
+        Mirrors corepp's ``get_latents_dict`` but uses ``weights_only=True``
+        for safety and detaches the tensors so they are never part of any
+        computation graph.
+        """
+        latents: dict[str, torch.Tensor] = {}
+        for label, path in label_to_path.items():
+            latents[label] = torch.load(path, weights_only=True, map_location='cpu').detach()
+        return latents
 
     def _parse_augmentation_cfg(self, cfg: dict | None) -> dict:
         # Backward-compatible defaults approximate previous behaviour.
@@ -273,7 +292,7 @@ class PointCloudLatentDataset(Dataset):
             points = self._augment_points(points)
         data = Data(pos=points)
 
-        latent = torch.load(latent_path, weights_only=True, map_location='cpu').detach()  # (latent_size,)
+        latent = self.latents_dict[label]  # (latent_size,) — pre-loaded at init
         # Shape (1, latent_size) so PyG's Batch concatenates to (B, latent_size)
         data.latent = latent.unsqueeze(0)
 
