@@ -90,22 +90,15 @@ lambda_attraction:  0.05      # weight applied to AttRepLoss (matches corepp sup
 delta_rep:          0.5       # margin for repulsion hinge loss
 
 # ---- Inference / test settings -----------------------------
-grid_resolution: 60          # resolution^3 SDF query points per sample (uniform mode only)
+grid_resolution: 20          # resolution^3 SDF query points per sample (uniform mode only)
 grid_bbox:       0.15        # half-extent of the bounding box (metres)
+
 # grid_center: the mean centroid of the complete laser scans (in the scanner
 # coordinate frame).  The corepp decoder was trained on *uncentered* scans, so
 # all potato shapes sit near this point rather than the origin.  test.py and
 # select_checkpoint.py shift the SDF query grid by this offset so the decoder
 # is evaluated at the correct spatial location.
 #
-# Run this on the server once to compute the value:
-  # python - <<'EOF'
-  # import glob, numpy as np, open3d as o3d
-  # paths = sorted(glob.glob("data/3DPotatoTwin/2_sfm/4_pcd/*/*.ply"))
-  # centroids = [np.asarray(o3d.io.read_point_cloud(p).get_center()) for p in paths]
-  # p0 = np.mean(centroids, axis=0)
-  # print(f"grid_center: [{p0[0]:.6f}, {p0[1]:.6f}, {p0[2]:.6f}]")
-  # EOF
 #
 # Then replace the placeholder below with the printed values:
 grid_center: [-0.001390, 0.001177, 0.102020]

@@ -79,8 +79,8 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
     mesh = _clean_mesh(hull_gpu.to_legacy())
 
     while not mesh.is_watertight():
-        voxel_size += 0.001
-        if voxel_size > 0.05:
+        voxel_size += 0.005  # match corepp/utils.sdf2mesh_cuda
+        if voxel_size > 0.15:
             raise RuntimeError(
                 "Could not produce a watertight mesh after progressive "
                 "voxel downsampling."
@@ -93,7 +93,7 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
 
 
 def _clean_mesh(mesh):
-    mesh = mesh.subdivide_loop(number_of_iterations=0)
+    mesh = mesh.subdivide_loop(number_of_iterations=1)  # match corepp sdf2mesh_cuda
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_triangles()
     mesh.remove_duplicated_vertices()
