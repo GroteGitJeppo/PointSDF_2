@@ -95,8 +95,10 @@ class SDFSceneDataset(Dataset):
         if augmented_sdf_data_dir and os.path.isdir(augmented_sdf_data_dir):
             for aug_label in sorted(os.listdir(augmented_sdf_data_dir)):
                 aug_dir = os.path.join(augmented_sdf_data_dir, aug_label)
-                npz_path = os.path.join(aug_dir, 'samples.npz')
-                if not os.path.isfile(npz_path):
+                if not os.path.isdir(aug_dir):
+                    continue
+                npz_path = resolve_samples_npz(augmented_sdf_data_dir, aug_label)
+                if npz_path is None:
                     continue
                 idx = len(self.labels)
                 self.label_to_idx[aug_label] = idx
