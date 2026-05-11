@@ -44,6 +44,7 @@ from torch_geometric.data import Data
 from torch_geometric.typing import WITH_TORCH_CLUSTER
 from tqdm import tqdm
 
+from data.ply_index import load_ply_files
 from models import PointNetEncoder, SDFDecoder
 from utils import decode_sdf_hierarchical, get_volume_coords, sdf2mesh
 from metrics_3d.chamfer_distance import ChamferDistance
@@ -143,8 +144,6 @@ def main(cfg: dict, checkpoint_path: str):
     # ----- Dataset paths -----
     splits_df = pd.read_csv(cfg['splits_csv'], delimiter=',')
     test_ids = set(splits_df.loc[splits_df['split'] == 'test', 'label'].astype(str))
-    all_files = list(Path(cfg['data_root']).rglob('*.ply'))
-    ply_files = [str(f) for f in all_files if f.parent.name in test_ids]
 
     volume_col = cfg.get('volume_column', 'volume_ml')
     gt_df = pd.read_csv(cfg['target_csv'], delimiter=',').set_index('label')
@@ -157,6 +156,27 @@ def main(cfg: dict, checkpoint_path: str):
         for col in ('cultivar', 'growing_season'):
             if col not in gt_df.columns and col in meta_df.columns:
                 gt_df = gt_df.join(meta_df[[col]], how='left')
+
+    # ----- Year filter -----
+    year_filter = cfg.get('_year_filter', 'all')
+    if year_filter != 'all':
+        if 'year' not in gt_df.columns:
+            raise ValueError(
+                f"--year {year_filter} requested but target_csv has no 'year' column."
+            )
+        target_year = int(year_filter)
+        year_ids = set(
+            gt_df[gt_df['year'].apply(
+                lambda v: pd.notna(v) and int(float(v)) == target_year
+            )].index.astype(str)
+        )
+        before = len(test_ids)
+        test_ids = test_ids & year_ids
+        print(f'Year filter: {target_year} — kept {len(test_ids)}/{before} test labels')
+    else:
+        print(f'Year filter: all — {len(test_ids)} test labels')
+
+    ply_files = load_ply_files(cfg['data_root'], test_ids, cfg.get('ply_index_csv'))
 
     pre_transform = T.Center()
     num_points = cfg.get('num_points', 1024)
@@ -454,9 +474,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Stage 2: encoder evaluation')
     parser.add_argument('--config', '-c', required=True, help='Path to YAML encoder config')
     parser.add_argument('--checkpoint', required=True, help='Path to checkpoint.pth')
+    parser.add_argument(
+        '--year', default='all', choices=['2023', '2025', 'all'],
+        help='Restrict evaluation to a single year cohort (2023 / 2025) or run on all test labels (default: all)',
+    )
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    cfg['_year_filter'] = args.year
     main(cfg, args.checkpoint)

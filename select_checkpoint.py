@@ -36,6 +36,7 @@ from torch_geometric.data import Data
 from torch_geometric.typing import WITH_TORCH_CLUSTER
 from tqdm import tqdm
 
+from data.ply_index import load_ply_files
 from models import PointNetEncoder, SDFDecoder
 from utils import get_volume_coords, sdf2mesh
 
@@ -159,8 +160,7 @@ def main(cfg: dict, run_dir: str, split: str, also_best_mse: bool):
     if not split_ids:
         raise ValueError(f"No labels found for split='{split}' in {cfg['splits_csv']}")
 
-    all_files = list(Path(cfg['data_root']).rglob('*.ply'))
-    ply_files = [str(f) for f in all_files if f.parent.name in split_ids]
+    ply_files = load_ply_files(cfg['data_root'], split_ids, cfg.get('ply_index_csv'))
     print(f'Split "{split}": {len(ply_files)} PLY files across {len(split_ids)} labels')
 
     volume_col = cfg.get('volume_column', 'volume_ml')
