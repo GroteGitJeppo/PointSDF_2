@@ -8,6 +8,12 @@
 # ---- Data (server paths) -----------------------------------
 data_root:  data/3DPotatoTwin/1_rgbd/2_pcd
 splits_csv: data/3DPotatoTwin/splits.csv
+# Pre-built PLY file index for fast lookup in test.py / select_checkpoint.py.
+# Build once on the server (replaces slow rglob on network filesystems):
+#   python -m data.ply_index --data_root data/3DPotatoTwin/1_rgbd/2_pcd \
+#                            --output    data/3DPotatoTwin/ply_index.csv
+# Then uncomment the line below:
+# ply_index_csv: data/3DPotatoTwin/ply_index.csv
 target_csv:    data/3DPotatoTwin/mesh_traits.csv
 volume_column: "volume (cm3)"     # column in target_csv that holds ground-truth volume (cm³ = mL)
 metadata_csv:  data/3DPotatoTwin/ground_truth.csv   # optional: provides cultivar / growing_season columns
@@ -57,10 +63,10 @@ augmentation:
   flip_x_prob:         0.55
   scale_min:           0.95
   scale_max:           1.05
-  point_dropout_prob:  0.0
+  point_dropout_prob:  0.5
   point_dropout_min:   0.10
   point_dropout_max:   0.25
-  occlusion_prob:      0.0
+  occlusion_prob:      0.5
   occlusion_ratio_min: 0.08
   occlusion_ratio_max: 0.28
 
