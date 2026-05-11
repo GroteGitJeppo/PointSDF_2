@@ -13,10 +13,12 @@ Metrics match corepp/test.py exactly:
   - Per-label ``year`` (from ``target_csv``, e.g. mesh_traits) is printed in the per-year summary
 
 Timing (corepp-comparable):
-  - exec_time_ms per row: encoder → save latent to ``<latent_dir>/test/<ply_stem>.pth`` →
-    decoder (full SDF grid) → convex-hull mesh / volume. Excludes PLY load + FPS
-    (process_ply) and excludes Chamfer / P&R.
-  - Printed "Avg exec" stats exclude the first sample (CUDA / graph warmup), matching
+  - Per-row milliseconds with CUDA synchronization between GPU stages so splits are
+    meaningful on GPU (small overhead vs decode cost).
+  - encoder_ms, latent_save_ms, decoder_ms, convex_hull_ms segment the pipeline;
+    exec_time_ms is the wall time for that whole block (same components as before).
+  - Excludes PLY load + FPS (process_ply) and Chamfer / P&R.
+  - Printed aggregate exec stats exclude the first sample (CUDA warmup), matching
     corepp's skip of the first iteration.
 
 Usage:
@@ -43,7 +45,7 @@ from torch_geometric.typing import WITH_TORCH_CLUSTER
 from tqdm import tqdm
 
 from models import PointNetEncoder, SDFDecoder
-from utils import get_volume_coords, sdf2mesh
+from utils import decode_sdf_hierarchical, get_volume_coords, sdf2mesh
 from metrics_3d.chamfer_distance import ChamferDistance
 from metrics_3d.precision_recall import PrecisionRecall
 
@@ -51,6 +53,12 @@ warnings.filterwarnings('ignore')
 
 if not WITH_TORCH_CLUSTER:
     raise SystemExit("This code requires 'torch-cluster'")
+
+
+def _sync_cuda(device: torch.device) -> None:
+    """Wait for GPU work to finish so timers bracketing GPU sections are accurate."""
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
 
 
 def process_ply(ply_path: str, num_points: int, pre_transform, device):
@@ -80,6 +88,31 @@ def _load_gt_pcd(gt_pcd_dir: str, unique_id: str, ply_pattern: str):
     pcd = o3d.io.read_point_cloud(matches[0])
     pcd.translate(-pcd.get_center())
     return pcd
+
+
+def _chamfer_and_pr_one_pass(gt_pcd, mesh, cd_metric: ChamferDistance, pr_metric: PrecisionRecall):
+    """
+    Same semantics as separate ChamferDistance.update + PrecisionRecall.update +
+    compute_at_threshold(0.005), but one mesh→point cloud conversion (1M samples)
+    and one pair of Open3D distance computations instead of two copies.
+    """
+    if cd_metric.prediction_is_empty(mesh):
+        return 1000.0, 0.0, 0.0, 0.0
+
+    gt_conv = cd_metric.convert_to_pcd(gt_pcd)
+    pred_conv = cd_metric.convert_to_pcd(mesh)
+    dist_pt_2_gt = np.asarray(pred_conv.compute_point_cloud_distance(gt_conv))
+    dist_gt_2_pt = np.asarray(gt_conv.compute_point_cloud_distance(pred_conv))
+    chamfer_m = (float(np.mean(dist_gt_2_pt)) + float(np.mean(dist_pt_2_gt))) / 2.0
+
+    t = pr_metric.find_nearest_threshold(0.005)
+    p = 100.0 / len(dist_pt_2_gt) * int(np.sum(dist_pt_2_gt < t))
+    r = 100.0 / len(dist_gt_2_pt) * int(np.sum(dist_gt_2_pt < t))
+    if p == 0 or r == 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * p * r / (p + r)
+    return chamfer_m, p, r, f1
 
 
 def main(cfg: dict, checkpoint_path: str):
@@ -130,8 +163,34 @@ def main(cfg: dict, checkpoint_path: str):
     grid_resolution = cfg.get('grid_resolution', 64)
     grid_bbox = cfg.get('grid_bbox', 0.15)
 
-    # Pre-compute grid coords (shared across all test samples)
-    grid_coords = get_volume_coords(resolution=grid_resolution, bbox=grid_bbox).to(device)
+    hierarchical_decode = bool(cfg.get('hierarchical_decode', False))
+    coarse_resolution = int(cfg.get('coarse_resolution', 16))
+    fine_subdiv = int(cfg.get('fine_subdiv', 4))
+    surface_dilation = int(cfg.get('surface_dilation', 1))
+    max_fine_queries = cfg.get('max_fine_queries', None)
+    if max_fine_queries is not None:
+        max_fine_queries = int(max_fine_queries)
+    decode_chunk = int(cfg.get('hierarchical_decode_chunk', 131072))
+
+    # grid_center shifts the SDF query grid from the origin to the position where
+    # the complete laser scans actually live in the scanner coordinate frame.
+    # Required when the decoder was trained on uncentered data (e.g. corepp weights).
+    # Compute the value once on the server with the script in train_encoder.yaml.
+    grid_center = torch.tensor(
+        cfg.get('grid_center', [0.0, 0.0, 0.0]), dtype=torch.float, device=device
+    )
+    if float(grid_center.norm()) > 1e-6:
+        print(f'SDF grid center offset: {grid_center.cpu().tolist()}')
+
+    if hierarchical_decode:
+        R_fine = (coarse_resolution - 1) * fine_subdiv + 1
+        print(
+            f'Hierarchical SDF decode: R_coarse={coarse_resolution}, subdiv={fine_subdiv}, '
+            f'dilation={surface_dilation} → embedded R_fine={R_fine} (grid_resolution={grid_resolution} unused)'
+        )
+        grid_coords = None
+    else:
+        grid_coords = get_volume_coords(resolution=grid_resolution, bbox=grid_bbox).to(device) + grid_center
 
     # GT point clouds for corepp-compatible Chamfer / P&R
     gt_pcd_dir = cfg.get('gt_pcd_dir', None)
@@ -156,15 +215,23 @@ def main(cfg: dict, checkpoint_path: str):
     os.makedirs(latent_test_dir, exist_ok=True)
     print(f'Encoder latents will be saved under {latent_test_dir}')
 
+    # One GT PLY per tuber — avoid repeated glob + disk read each test sample
+    gt_pcd_cache: dict[str, o3d.geometry.PointCloud | None] = {}
+
     # ----- Output columns -----
     columns = [
         'file_name', 'unique_id', 'cultivar', 'growing_season', 'year',
         'gt_volume_ml', 'pred_volume_ml',
         'chamfer_mm', 'precision', 'recall', 'f1',
+        'encoder_ms', 'latent_save_ms', 'decoder_ms', 'convex_hull_ms',
         'exec_time_ms',
     ]
     rows = []
     exec_times = []
+    encoder_times: list[float] = []
+    latent_save_times: list[float] = []
+    decoder_times: list[float] = []
+    hull_times: list[float] = []
     chamfer_values = []
     prec_values = []
     rec_values = []
@@ -183,16 +250,41 @@ def main(cfg: dict, checkpoint_path: str):
 
             t0 = timeit.default_timer()
             latent = encoder(data)                          # (1, latent_size)
+            _sync_cuda(device)
+            t1 = timeit.default_timer()
+            encoder_ms = (t1 - t0) * 1e3
 
             # Per-scan latent on disk — same placement as corepp/test.py (after encoder,
             # before grid decode); included in exec_time_ms.
+            t_ls0 = timeit.default_timer()
             latent_save = latent.detach().cpu().squeeze()
             stem = Path(ply_file).stem
             torch.save(latent_save, os.path.join(latent_test_dir, f'{stem}.pth'))
+            t_ls1 = timeit.default_timer()
+            latent_save_ms = (t_ls1 - t_ls0) * 1e3
 
-            latent_tiled = latent.expand(grid_coords.size(0), -1)
-            decoder_input = torch.cat([latent_tiled, grid_coords], dim=1)
-            pred_sdf = decoder(decoder_input)               # (N, 1)
+            t_dec0 = timeit.default_timer()
+            if hierarchical_decode:
+                grid_coords, pred_sdf = decode_sdf_hierarchical(
+                    latent=latent,
+                    decoder=decoder,
+                    bbox=grid_bbox,
+                    R_coarse=coarse_resolution,
+                    subdiv=fine_subdiv,
+                    surface_dilation=surface_dilation,
+                    device=device,
+                    clamp_dist=None,
+                    max_fine_queries=max_fine_queries,
+                    decode_chunk=decode_chunk,
+                    warn_fn=lambda msg: print(f'  {unique_id}: {msg}'),
+                )
+            else:
+                latent_tiled = latent.expand(grid_coords.size(0), -1)
+                decoder_input = torch.cat([latent_tiled, grid_coords], dim=1)
+                pred_sdf = decoder(decoder_input)
+            _sync_cuda(device)
+            t_dec1 = timeit.default_timer()
+            decoder_ms = (t_dec1 - t_dec0) * 1e3
 
             pred_volume = float('nan')
             chamfer_mm = float('nan')
@@ -201,31 +293,38 @@ def main(cfg: dict, checkpoint_path: str):
             f1 = float('nan')
             mesh = None
 
+            t_hull0 = timeit.default_timer()
             try:
                 mesh = sdf2mesh(pred_sdf, grid_coords)
                 if mesh.is_watertight():
                     pred_volume = round(mesh.get_volume() * 1e6, 2)  # m³ → mL
+                # Translate mesh back to the origin so that Chamfer comparison
+                # with the centred GT PLY (from _load_gt_pcd) is in the same
+                # frame.  Volume is translation-invariant so it is unaffected.
+                if float(grid_center.norm()) > 1e-6:
+                    mesh.translate(-grid_center.cpu().numpy())
             except (ValueError, RuntimeError) as e:
                 print(f'  Mesh extraction failed for {unique_id}: {e}')
+            _sync_cuda(device)
+            t_hull1 = timeit.default_timer()
+            convex_hull_ms = (t_hull1 - t_hull0) * 1e3
 
-            elapsed_ms = (timeit.default_timer() - t0) * 1e3
+            elapsed_ms = (t_hull1 - t0) * 1e3
 
             # corepp-compatible shape metrics: GT = centred complete scan PLY
             if compute_shape_metrics and mesh is not None:
                 try:
-                    gt_pcd = _load_gt_pcd(gt_pcd_dir, unique_id, gt_ply_pattern)
+                    if unique_id not in gt_pcd_cache:
+                        gt_pcd_cache[unique_id] = _load_gt_pcd(
+                            gt_pcd_dir, unique_id, gt_ply_pattern
+                        )
+                    gt_pcd = gt_pcd_cache[unique_id]
                     if gt_pcd is not None:
-                        cd_metric.reset()
-                        cd_metric.update(gt_pcd, mesh)
-                        chamfer_m = cd_metric.compute(print_output=False)
+                        chamfer_m, prec, rec, f1 = _chamfer_and_pr_one_pass(
+                            gt_pcd, mesh, cd_metric, pr_metric
+                        )
                         chamfer_mm = round(chamfer_m * 1000, 6)
                         chamfer_values.append(chamfer_m)
-
-                        pr_metric.reset()
-                        pr_metric.update(gt_pcd, mesh)
-                        prec, rec, f1, _ = pr_metric.compute_at_threshold(
-                            0.005, print_output=False
-                        )
                         prec = round(prec, 1)
                         rec = round(rec, 1)
                         f1 = round(f1, 1)
@@ -238,6 +337,10 @@ def main(cfg: dict, checkpoint_path: str):
                     print(f'  Shape metrics failed for {unique_id}: {e}')
 
             exec_times.append(elapsed_ms)
+            encoder_times.append(encoder_ms)
+            latent_save_times.append(latent_save_ms)
+            decoder_times.append(decoder_ms)
+            hull_times.append(convex_hull_ms)
 
             cultivar = gt_df.loc[unique_id, 'cultivar'] if 'cultivar' in gt_df.columns else ''
             season = gt_df.loc[unique_id, 'growing_season'] if 'growing_season' in gt_df.columns else ''
@@ -262,6 +365,10 @@ def main(cfg: dict, checkpoint_path: str):
                 'precision': prec,
                 'recall': rec,
                 'f1': f1,
+                'encoder_ms': round(encoder_ms, 2),
+                'latent_save_ms': round(latent_save_ms, 2),
+                'decoder_ms': round(decoder_ms, 2),
+                'convex_hull_ms': round(convex_hull_ms, 2),
                 'exec_time_ms': round(elapsed_ms, 2),
             })
 
@@ -284,12 +391,17 @@ def main(cfg: dict, checkpoint_path: str):
     if not exec_times:
         print('  Avg exec:      n/a (no samples timed)')
     elif len(exec_times) > 1:
-        mean_exec = float(np.mean(exec_times[1:]))
-        median_exec = float(np.median(exec_times[1:]))
+        sl = slice(1, None)
+        mean_exec = float(np.mean(exec_times[sl]))
+        median_exec = float(np.median(exec_times[sl]))
         print(
-            f'  Median exec:   {median_exec:.1f} ms  '
-            f'  Avg exec:      {mean_exec:.1f} ms  (dismissed in favor of median)'
-
+            f'  Exec total (excl. 1st sample): median {median_exec:.1f} ms | mean {mean_exec:.1f} ms'
+        )
+        print(
+            f'    mean encoder {float(np.mean(encoder_times[sl])):.1f} ms | '
+            f'latent save {float(np.mean(latent_save_times[sl])):.1f} ms | '
+            f'decoder {float(np.mean(decoder_times[sl])):.1f} ms | '
+            f'convex hull {float(np.mean(hull_times[sl])):.1f} ms'
         )
 
     def _shape_str(sel):

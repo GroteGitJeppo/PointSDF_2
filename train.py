@@ -23,13 +23,16 @@ import time
 import warnings
 from datetime import datetime
 from pathlib import Path
+from collections import Counter
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import yaml
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import WeightedRandomSampler
 
 from torch_geometric.loader import DataLoader
 from torch_geometric.typing import WITH_TORCH_CLUSTER
@@ -180,6 +183,98 @@ def val_epoch(
 
 
 # ---------------------------------------------------------------------------
+# Sampling helpers (morphology-balanced training)
+# ---------------------------------------------------------------------------
+
+def _make_sample_weights(
+    sample_labels: list[str],
+    target_csv: str | None,
+    trait_col: str = "volume (cm3)",
+    num_bins: int = 4,
+    balance_cultivar: bool = False,
+    metadata_csv: str | None = None,
+) -> tuple[torch.Tensor, list[str], dict]:
+    """
+    Build inverse-frequency sample weights by morphology bins (optionally x cultivar).
+
+    Returns:
+        weights: (N_samples,) float tensor
+        keys:    per-sample key used for balancing (e.g., 'bin_1|Kitahime')
+        stats:   summary dict for logging
+    """
+    n = len(sample_labels)
+    if n == 0 or not target_csv:
+        return torch.ones(n, dtype=torch.double), ["all"] * n, {"mode": "uniform"}
+
+    target_df = pd.read_csv(target_csv)
+    if "label" not in target_df.columns or trait_col not in target_df.columns:
+        return torch.ones(n, dtype=torch.double), ["all"] * n, {
+            "mode": "uniform",
+            "reason": f"missing required columns in target_csv: label + {trait_col}",
+        }
+    target_df = target_df.set_index("label")
+
+    unique_labels = sorted(set(sample_labels))
+    vals = pd.to_numeric(
+        target_df.reindex(unique_labels)[trait_col], errors="coerce"
+    )
+    valid = vals.dropna()
+
+    label_to_bin: dict[str, str] = {}
+    if len(valid) >= 4 and int(num_bins) > 1:
+        q = int(min(num_bins, valid.nunique()))
+        if q > 1:
+            bins = pd.qcut(valid, q=q, labels=False, duplicates="drop")
+            for lbl, b in bins.items():
+                label_to_bin[lbl] = f"bin_{int(b)}"
+        else:
+            for lbl in unique_labels:
+                label_to_bin[lbl] = "bin_0"
+    else:
+        for lbl in unique_labels:
+            label_to_bin[lbl] = "bin_0"
+
+    for lbl in unique_labels:
+        label_to_bin.setdefault(lbl, "bin_missing")
+
+    label_to_cultivar: dict[str, str] = {lbl: "cultivar_unknown" for lbl in unique_labels}
+    if balance_cultivar:
+        if "cultivar" in target_df.columns:
+            c = target_df.reindex(unique_labels)["cultivar"].fillna("unknown").astype(str)
+            label_to_cultivar.update({lbl: f"cultivar_{v}" for lbl, v in c.items()})
+        elif metadata_csv:
+            meta_df = pd.read_csv(metadata_csv)
+            if "label" in meta_df.columns and "cultivar" in meta_df.columns:
+                meta_df = meta_df.set_index("label")
+                c = meta_df.reindex(unique_labels)["cultivar"].fillna("unknown").astype(str)
+                label_to_cultivar.update({lbl: f"cultivar_{v}" for lbl, v in c.items()})
+
+    keys = []
+    for lbl in sample_labels:
+        bin_key = label_to_bin.get(lbl, "bin_missing")
+        if balance_cultivar:
+            cult_key = label_to_cultivar.get(lbl, "cultivar_unknown")
+            keys.append(f"{bin_key}|{cult_key}")
+        else:
+            keys.append(bin_key)
+
+    counts = Counter(keys)
+    weights = torch.tensor(
+        [1.0 / max(counts[k], 1) for k in keys], dtype=torch.double
+    )
+
+    stats = {
+        "mode": "morphology_weighted",
+        "trait_col": trait_col,
+        "num_bins_requested": int(num_bins),
+        "num_bins_effective": len({v for v in label_to_bin.values()}),
+        "balance_cultivar": bool(balance_cultivar),
+        "group_counts": dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True)),
+    }
+    return weights, keys, stats
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -198,6 +293,8 @@ def main(cfg: dict):
     with open(os.path.join(output_dir, 'config.yaml'), 'w') as f:
         yaml.dump(cfg, f)
     writer = SummaryWriter(log_dir=output_dir)
+    print("Evaluation protocol: 2025 is strict blind test-only. "
+          "Checkpoint selection uses train/val only.")
 
     # ----- Load Stage 1 decoder (frozen) -----
     decoder_cfg_path = cfg['decoder_config']
@@ -224,13 +321,18 @@ def main(cfg: dict):
     sdf_samples = int(cfg.get('sdf_samples_per_shape', 1024))
     sdf_clamp = cfg.get('sdf_clamp_value', None)
 
+    use_augmentation = bool(cfg.get('augmentation_enabled', True))
+    if not use_augmentation:
+        print('Augmentation disabled (augmentation_enabled: false).')
+
     train_ds = PointCloudLatentDataset(
         data_root=cfg['data_root'],
         splits_csv=cfg['splits_csv'],
-        latent_dir=os.path.join(cfg['latent_dir'], 'train'),
+        latent_dir=cfg['latent_dir'],
         split='train',
         num_points=cfg.get('num_points', 1024),
-        apply_augmentation=True,
+        apply_augmentation=use_augmentation,
+        augmentation_cfg=cfg.get('augmentation', None),
         sdf_data_dir=sdf_data_dir,
         sdf_samples_per_shape=sdf_samples,
         sdf_clamp_value=sdf_clamp,
@@ -238,7 +340,7 @@ def main(cfg: dict):
     val_ds = PointCloudLatentDataset(
         data_root=cfg['data_root'],
         splits_csv=cfg['splits_csv'],
-        latent_dir=os.path.join(cfg['latent_dir'], 'val'),
+        latent_dir=cfg['latent_dir'],
         split='val',
         num_points=cfg.get('num_points', 1024),
         apply_augmentation=False,
@@ -247,9 +349,34 @@ def main(cfg: dict):
         sdf_clamp_value=sdf_clamp,
     )
 
+    # ----- Optional morphology-balanced sampler -----
+    sampler_cfg = cfg.get("sampler", {})
+    use_weighted_sampler = bool(sampler_cfg.get("enabled", False))
+    train_sampler = None
+    if use_weighted_sampler:
+        sample_labels = [lbl for _, lbl, _ in train_ds.samples]
+        sample_weights, _, sampler_stats = _make_sample_weights(
+            sample_labels=sample_labels,
+            target_csv=cfg.get("target_csv", None),
+            trait_col=sampler_cfg.get("trait_column", cfg.get("volume_column", "volume (cm3)")),
+            num_bins=int(sampler_cfg.get("num_bins", 4)),
+            balance_cultivar=bool(sampler_cfg.get("balance_cultivar", False)),
+            metadata_csv=cfg.get("metadata_csv", None),
+        )
+        train_sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        print("Weighted sampler enabled:")
+        print(f"  trait={sampler_stats.get('trait_col')} | bins={sampler_stats.get('num_bins_effective')}")
+        print(f"  group counts: {sampler_stats.get('group_counts')}")
+    else:
+        print("Weighted sampler disabled; using standard random shuffle.")
+
     train_loader = DataLoader(
         train_ds, batch_size=cfg.get('batch_size', 16),
-        shuffle=True, num_workers=4,
+        shuffle=(train_sampler is None), sampler=train_sampler, num_workers=4,
     )
     val_loader = DataLoader(
         val_ds, batch_size=cfg.get('batch_size', 16),

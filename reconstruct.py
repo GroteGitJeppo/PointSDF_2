@@ -49,7 +49,7 @@ from tqdm import tqdm
 from data.sdf_samples import resolve_samples_npz
 from models.decoder import Decoder
 from models import SDFDecoder
-from utils import get_volume_coords, sdf2mesh
+from utils import decode_sdf_hierarchical, get_volume_coords, sdf2mesh
 from metrics_3d.chamfer_distance import ChamferDistance
 
 MODEL_PARAMS_SUBDIR = "ModelParameters"
@@ -199,6 +199,12 @@ def _chamfer_for_latent(
     label: str,
     ply_pattern: str,
     grid_resolution: int = 64,
+    hierarchical_decode: bool = False,
+    coarse_resolution: int = 16,
+    fine_subdiv: int = 4,
+    surface_dilation: int = 1,
+    max_fine_queries: int | None = None,
+    decode_chunk: int = 131072,
 ) -> float | None:
     """
     Compute corepp-compatible Chamfer distance for one shape given its latent.
@@ -213,12 +219,29 @@ def _chamfer_for_latent(
         return None
 
     bbox = clamp_dist * 1.5
-    grid_coords = get_volume_coords(resolution=grid_resolution, bbox=bbox).cuda()
+    device = torch.device("cuda")
+    lat_b = latent.to(device).unsqueeze(0)
 
     with torch.no_grad():
-        lat_exp = latent.cuda().unsqueeze(0).expand(grid_coords.shape[0], -1)
-        net_in = torch.cat([lat_exp, grid_coords], dim=1)
-        pred_sdf = decoder(net_in)
+        if hierarchical_decode:
+            grid_coords, pred_sdf = decode_sdf_hierarchical(
+                latent=lat_b,
+                decoder=decoder,
+                bbox=bbox,
+                R_coarse=coarse_resolution,
+                subdiv=fine_subdiv,
+                surface_dilation=surface_dilation,
+                device=device,
+                clamp_dist=None,
+                max_fine_queries=max_fine_queries,
+                decode_chunk=decode_chunk,
+                warn_fn=lambda msg: logging.debug("    %s: %s", label, msg),
+            )
+        else:
+            grid_coords = get_volume_coords(resolution=grid_resolution, bbox=bbox).to(device)
+            lat_exp = lat_b.expand(grid_coords.shape[0], -1)
+            net_in = torch.cat([lat_exp, grid_coords], dim=1)
+            pred_sdf = decoder(net_in)
 
     try:
         mesh = sdf2mesh(pred_sdf, grid_coords)
@@ -330,6 +353,9 @@ def _run_checkpoint(
                 )
                 compute_chamfer = False
             else:
+                mfq = cfg.get("max_fine_queries", None)
+                if mfq is not None:
+                    mfq = int(mfq)
                 cd = _chamfer_for_latent(
                     latent=latent,
                     decoder=decoder,
@@ -337,6 +363,13 @@ def _run_checkpoint(
                     gt_pcd_dir=gt_pcd_dir,
                     label=label,
                     ply_pattern=ply_pattern,
+                    grid_resolution=int(cfg.get("grid_resolution", 64)),
+                    hierarchical_decode=bool(cfg.get("hierarchical_decode", False)),
+                    coarse_resolution=int(cfg.get("coarse_resolution", 16)),
+                    fine_subdiv=int(cfg.get("fine_subdiv", 4)),
+                    surface_dilation=int(cfg.get("surface_dilation", 1)),
+                    max_fine_queries=mfq,
+                    decode_chunk=int(cfg.get("hierarchical_decode_chunk", 131072)),
                 )
                 if cd is not None:
                     chamfer_vals.append(cd)

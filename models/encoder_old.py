@@ -12,8 +12,7 @@ class SAModule(torch.nn.Module):
 
     def forward(self, x, pos, batch):
         idx = fps(pos, batch, ratio=self.ratio)
-        row, col = radius(pos, pos[idx], self.r, batch, batch[idx],
-                          max_num_neighbors=64)
+        row, col = radius(pos, pos[idx], self.r, batch, batch[idx], max_num_neighbors=64)
         edge_index = torch.stack([col, row], dim=0)
         x_dst = None if x is None else x[idx]
         x = self.conv((x, x_dst), (pos, pos[idx]), edge_index)
@@ -37,27 +36,20 @@ class GlobalSAModule(torch.nn.Module):
 class PointNetEncoder(torch.nn.Module):
     """
     PointNet++ encoder: partial point cloud → latent code of size `latent_size`.
-
-    Three-level hierarchy tuned for potato geometry (max ~10 cm per axis):
-      SA1  r=0.02 m — small local surface patch
-      SA2  r=0.04 m — medium neighbourhood covering most of the potato
-      SA3  GlobalSA — full-shape aggregation
+    Reduced-capacity architecture to prevent overfitting on simple convex geometries.
     """
 
     def __init__(self, latent_size: int = 32):
         super().__init__()
         self.latent_size = latent_size
-
-        self.sa1_module = SAModule(0.5, 0.02, MLP([3, 64, 64, 128]))
-        self.sa2_module = SAModule(0.25, 0.04, MLP([128 + 3, 128, 128, 256]))
-        self.sa3_module = GlobalSAModule(MLP([256 + 3, 256, 512, 1024]))
-
+        self.sa1_module = SAModule(ratio=0.25, r=0.2, nn=MLP([3, 32, 32, 64], norm="batch_norm"))
+        self.sa2_module = GlobalSAModule(MLP([64 + 3, 64, 128, 256], norm="batch_norm"))
         self.latent_head = nn.Sequential(
-            nn.Linear(1024, 512),
-            nn.BatchNorm1d(512),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
             nn.LeakyReLU(0.2),
-            nn.Dropout(0.3),
-            nn.Linear(512, latent_size),
+            nn.Dropout(0.5),
+            nn.Linear(128, latent_size),
         )
 
     def forward(self, data):
@@ -70,6 +62,5 @@ class PointNetEncoder(torch.nn.Module):
         sa0_out = (data.x, data.pos, data.batch)
         sa1_out = self.sa1_module(*sa0_out)
         sa2_out = self.sa2_module(*sa1_out)
-        sa3_out = self.sa3_module(*sa2_out)
-        x, _, _ = sa3_out
+        x, _, _ = sa2_out
         return self.latent_head(x)

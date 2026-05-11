@@ -6,6 +6,13 @@ import torch.utils.dlpack
 import open3d as o3d
 import open3d.core as o3c
 
+# Maximum number of interior SDF points passed to Open3D's GPU convex hull.
+# stdgpu (Open3D's internal GPU data structure) pre-allocates fixed-size buffers;
+# passing more points causes buffer overflow and silent hull corruption.
+# A convex hull depends only on extreme points, so random subsampling to this
+# limit is geometrically safe for roughly-convex shapes like potato tubers.
+MAX_HULL_POINTS = 1500
+
 
 # ---------------------------------------------------------------------------
 # Volume / mesh extraction
@@ -60,6 +67,10 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
             "Try lowering the SDF threshold or increasing grid resolution."
         )
 
+    if keep_points.shape[0] > MAX_HULL_POINTS:
+        idx = torch.randperm(keep_points.shape[0], device=keep_points.device)[:MAX_HULL_POINTS]
+        keep_points = keep_points[idx].contiguous()
+
     o3d_t = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(keep_points))
     pcd_gpu = o3d.t.geometry.PointCloud(o3d_t)
 
@@ -68,8 +79,8 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
     mesh = _clean_mesh(hull_gpu.to_legacy())
 
     while not mesh.is_watertight():
-        voxel_size += 0.001
-        if voxel_size > 0.05:
+        voxel_size += 0.005  # match corepp/utils.sdf2mesh_cuda
+        if voxel_size > 0.15:
             raise RuntimeError(
                 "Could not produce a watertight mesh after progressive "
                 "voxel downsampling."
@@ -82,7 +93,7 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
 
 
 def _clean_mesh(mesh):
-    mesh = mesh.subdivide_loop(number_of_iterations=4)
+    mesh = mesh.subdivide_loop(number_of_iterations=1)  # match corepp sdf2mesh_cuda
     mesh.remove_degenerate_triangles()
     mesh.remove_duplicated_triangles()
     mesh.remove_duplicated_vertices()

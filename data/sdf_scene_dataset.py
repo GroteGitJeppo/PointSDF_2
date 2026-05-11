@@ -4,7 +4,13 @@ Per-shape SDF sample dataset for Stage 1 (train_deepsdf.py).
 All samples.npz files for the split are loaded into RAM at init (no disk read
 per epoch). Each __getitem__ returns a random subsample of `samples_per_scene`
 points (half positive / half negative SDF samples).
+
+Augmented shapes (from augmented_sdf_data_dir) are always added to the training
+set regardless of splits_csv.  Their labels are tracked in `augmented_labels` so
+the caller can skip them when saving Stage 2 latent targets.
 """
+
+import os
 
 import numpy as np
 import pandas as pd
@@ -19,6 +25,17 @@ def _remove_nans(tensor: torch.Tensor) -> torch.Tensor:
     return tensor[mask]
 
 
+def _load_npz(path: str) -> tuple[torch.Tensor, torch.Tensor]:
+    data = np.load(path)
+    pos = _remove_nans(torch.from_numpy(np.asarray(data['pos'], dtype=np.float32)))
+    neg = _remove_nans(torch.from_numpy(np.asarray(data['neg'], dtype=np.float32)))
+    if pos.shape[0] > 0:
+        pos = pos[torch.randperm(pos.shape[0])]
+    if neg.shape[0] > 0:
+        neg = neg[torch.randperm(neg.shape[0])]
+    return pos, neg
+
+
 class SDFSceneDataset(Dataset):
     """
     Args:
@@ -27,6 +44,12 @@ class SDFSceneDataset(Dataset):
         split: Single split name, or list of names (e.g. ['train', 'val']). Test excluded by config.
         samples_per_scene: Total random SDF points per shape per __getitem__.
         clamp_value: If set, clamp sdf targets to [-v, v].
+        augmented_sdf_data_dir: Optional second root whose sub-folders are augmented
+            variants (e.g. '<label>_00' … '<label>_09').  Every sub-folder that
+            contains a samples.npz is added to the training set as an additional
+            shape with its own latent code.  These labels are recorded in
+            ``self.augmented_labels`` so train_deepsdf.py can exclude them when
+            writing Stage 2 per-label latent files.
     """
 
     def __init__(
@@ -36,6 +59,7 @@ class SDFSceneDataset(Dataset):
         split: str | list[str],
         samples_per_scene: int,
         clamp_value: float | None = None,
+        augmented_sdf_data_dir: str | None = None,
     ):
         splits_df = pd.read_csv(splits_csv)
 
@@ -50,6 +74,7 @@ class SDFSceneDataset(Dataset):
         self.labels: list[str] = []
         self.label_to_idx: dict[str, int] = {}
         self._ram_pos_neg: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.augmented_labels: set[str] = set()
 
         for label in sorted(labels):
             path = resolve_samples_npz(sdf_data_dir, label)
@@ -58,33 +83,52 @@ class SDFSceneDataset(Dataset):
             idx = len(self.labels)
             self.label_to_idx[label] = idx
             self.labels.append(label)
-
-            data = np.load(path)
-            pos = torch.from_numpy(np.asarray(data['pos'], dtype=np.float32))
-            neg = torch.from_numpy(np.asarray(data['neg'], dtype=np.float32))
-            pos = _remove_nans(pos)
-            neg = _remove_nans(neg)
-            if pos.shape[0] > 0:
-                pos = pos[torch.randperm(pos.shape[0])]
-            if neg.shape[0] > 0:
-                neg = neg[torch.randperm(neg.shape[0])]
-            self._ram_pos_neg.append((pos, neg))
+            self._ram_pos_neg.append(_load_npz(path))
 
         if not self.labels:
             raise RuntimeError(
                 f"No samples.npz found under '{sdf_data_dir}' for split={split!r}."
             )
+
+        # -- Augmented shapes (always train-only, bypass splits CSV) ----------
+        n_aug = 0
+        if augmented_sdf_data_dir and os.path.isdir(augmented_sdf_data_dir):
+            for aug_label in sorted(os.listdir(augmented_sdf_data_dir)):
+                aug_dir = os.path.join(augmented_sdf_data_dir, aug_label)
+                if not os.path.isdir(aug_dir):
+                    continue
+                npz_path = resolve_samples_npz(augmented_sdf_data_dir, aug_label)
+                if npz_path is None:
+                    continue
+                idx = len(self.labels)
+                self.label_to_idx[aug_label] = idx
+                self.labels.append(aug_label)
+                self.augmented_labels.add(aug_label)
+                self._ram_pos_neg.append(_load_npz(npz_path))
+                n_aug += 1
+            if n_aug:
+                print(
+                    f'SDFSceneDataset: added {n_aug} augmented shapes '
+                    f'from {augmented_sdf_data_dir}'
+                )
+            else:
+                print(
+                    f'SDFSceneDataset: WARNING — augmented_sdf_data_dir set but no '
+                    f'samples.npz found under {augmented_sdf_data_dir}'
+                )
+
         if samples_per_scene < 2:
             raise ValueError('samples_per_scene must be at least 2 (pos/neg halves).')
 
+        n_orig = len(self.labels) - n_aug
         total_floats = sum(
             p.numel() + n.numel() for p, n in self._ram_pos_neg
         )
         approx_gib = total_floats * 4 / (1024 ** 3)
 
         print(
-            f'SDFSceneDataset [{split}]: {len(self.labels)} shapes, '
-            f'{samples_per_scene} samples/scene per step'
+            f'SDFSceneDataset [{split}]: {n_orig} original + {n_aug} augmented = '
+            f'{len(self.labels)} shapes, {samples_per_scene} samples/scene per step'
         )
         print(
             f'SDFSceneDataset: loaded all samples.npz into RAM '

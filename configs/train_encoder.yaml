@@ -1,6 +1,8 @@
 # ============================================================
 # Stage 2 config: PointNet++ encoder training
 # Update the paths below to match your server layout.
+# 2025 remains strict blind test-only: do not use test metrics
+# for model or hyperparameter selection.
 # ============================================================
 
 # ---- Data (server paths) -----------------------------------
@@ -15,12 +17,12 @@ metadata_csv:  data/3DPotatoTwin/ground_truth.csv   # optional: provides cultiva
 #          --experiment_dir weights/deepsdf/<run> --checkpoint <E*> --split train
 # Each file: <latent_dir>/<label>.pth  (single tensor of shape latent_size)
 # test.py also writes encoder latents per scan: <latent_dir>/test/<stem>.pth
-latent_dir: weights/deepsdf/11_04_024936/Reconstructions/380/Codes
+latent_dir: weights/deepsdf/potato_32/Reconstructions/130/Codes
 
 # ---- Stage 1 decoder (frozen) ------------------------------
 # Path to the best Stage 1 ModelParameters checkpoint (e.g. 500.pth).
 # Use the epoch E* selected by Chamfer distance on the val split via reconstruct.py.
-decoder_weights: weights/deepsdf/11_04_024936/ModelParameters/380.pth
+decoder_weights: weights/deepsdf/potato_32/ModelParameters/130.pth
 # Path to the Stage 1 config (used to read architecture params)
 decoder_config:  configs/train_deepsdf.yaml
 
@@ -29,35 +31,87 @@ output_dir: weights/encoder
 
 # ---- Encoder training --------------------------------------
 seed:              133
-epochs:            500
+epochs:            100
 batch_size:        16
 num_points:        1024
 lr:                0.0001
 weight_decay:      0.000001
-lr_gamma:          0.995     # ExponentialLR gamma per epoch (0.995^500 ≈ 0.082 — stays usable)
+lr_gamma:          0.97      # ExponentialLR gamma per epoch (0.97^100 ≈ 0.048 — matches paper)
 sigma_regulariser: 0.01      # weight of the latent L2 regulariser
 snapshot_frequency: 10       # save a checkpoint every N epochs for post-hoc volume-RMSE selection
 
+# ---- Augmentation (train split only) ------------------------
+# Set augmentation_enabled: false to train without any augmentation (useful for
+# debugging or ablation studies). When false, the augmentation block below is
+# ignored entirely and point clouds are loaded as-is (centered + FPS only).
+augmentation_enabled: false
+# Aggressive but bounded: strong viewpoint + distance stress without unbounded noise.
+# If val loss diverges, reduce jitter_std / scale span / dropout_max first.
+augmentation:
+  jitter_std:          0.0028
+  jitter_clip:         0.006
+  rotate_x_deg:        2.0
+  rotate_y_deg:        2.0
+  rotate_z_deg:        180.0
+  flip_x_prob:         0.55
+  scale_min:           0.95
+  scale_max:           1.05
+  point_dropout_prob:  0.0
+  point_dropout_min:   0.10
+  point_dropout_max:   0.25
+  occlusion_prob:      0.0
+  occlusion_ratio_min: 0.08
+  occlusion_ratio_max: 0.28
+
+# ---- Sampler (train split only) -----------------------------
+sampler:
+  enabled: true
+  trait_column: "volume (cm3)"   # from target_csv
+  num_bins: 10                     # quantile bins for inverse-frequency weights
+  balance_cultivar: false         # if true, balances by bin x cultivar group
+
 # ---- End-to-end SDF loss (Stage 2) -------------------------
-# Set sdf_data_dir to the same path used in Stage 1 to enable an additional
-# L1 SDF loss through the frozen decoder.  Leave empty / commented out to
-# train with latent MSE only (original behaviour).
+# Disabled: the SDF samples in sdf_data_dir were generated in the *centered*
+# coordinate frame (PointSDF_2 prepare_dataset.py applies pcd.translate(-centroid)),
+# but the corepp decoder was trained on *uncentered* laser scans.  Feeding
+# centered coordinates to the decoder produces wrong SDF values and corrupted
+# gradients.  Keep sdf_loss_weight at 0.0 when reusing the corepp decoder.
 #
-sdf_data_dir:           data/3DPotatoTwin/sdfsamples/potato
+# sdf_data_dir:           data/3DPotatoTwin/sdfsamples/potato
 sdf_samples_per_shape:  1024   # SDF points sampled per shape per batch step
 sdf_clamp_value:        0.1    # match Stage 1 clamp_value
-sdf_loss_weight:        0.1    # weight of the SDF L1 loss relative to latent MSE
+sdf_loss_weight:        0.0    # disabled — see note above
 
 # ---- Contrastive loss (AttRepLoss, matching corepp) --------
 # Attracts latents of the same tuber, repels latents of different tubers.
 # Requires each batch item to carry its label (potato tuber ID).
-contrastive_loss:   true
+contrastive_loss:   false
 lambda_attraction:  0.05      # weight applied to AttRepLoss (matches corepp super3d_32.json)
 delta_rep:          0.5       # margin for repulsion hinge loss
 
 # ---- Inference / test settings -----------------------------
-grid_resolution: 30          # resolution^3 SDF query points per sample
+grid_resolution: 20          # resolution^3 SDF query points per sample (uniform mode only)
 grid_bbox:       0.15        # half-extent of the bounding box (metres)
+
+# grid_center: the mean centroid of the complete laser scans (in the scanner
+# coordinate frame).  The corepp decoder was trained on *uncentered* scans, so
+# all potato shapes sit near this point rather than the origin.  test.py and
+# select_checkpoint.py shift the SDF query grid by this offset so the decoder
+# is evaluated at the correct spatial location.
+#
+#
+# Then replace the placeholder below with the printed values:
+grid_center: [-0.001390, 0.001177, 0.102020]
+# grid_center: [-0.001388, 0.001177, 0.102020]
+# Optional hierarchical decode (test.py): coarse grid + surface cells + fine
+# samples inside dilated cells. When hierarchical_decode is true, grid_resolution
+# is not used; effective fine lattice is R_fine = (coarse_resolution-1)*fine_subdiv+1.
+hierarchical_decode: false
+coarse_resolution: 16
+fine_subdiv: 4
+surface_dilation: 1
+max_fine_queries: null
+hierarchical_decode_chunk: 131072
 
 # ---- Evaluation (corepp-compatible metrics) ----------------
 # Directory containing one sub-folder per label, each holding the
