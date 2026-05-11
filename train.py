@@ -37,7 +37,7 @@ from torch.utils.data import WeightedRandomSampler
 from torch_geometric.loader import DataLoader
 from torch_geometric.typing import WITH_TORCH_CLUSTER
 
-from data.encoder_dataset import PointCloudLatentDataset
+from data.encoder_dataset import PointCloudLatentDataset, TuberBatchSampler
 from models import PointNetEncoder, SDFDecoder
 
 warnings.filterwarnings('ignore')
@@ -58,13 +58,17 @@ def att_rep_loss(latents: torch.Tensor, labels: list, delta_rep: float = 0.5) ->
       - same label  → attract: penalise ||z_i - z_j||
       - diff label  → repel:   penalise max(0, delta_rep - ||z_i - z_j||)
 
+    The raw sum is divided by B² so the return value is on the same scale
+    regardless of batch size, and comparable to the per-element MSE loss.
+
     Args:
         latents:   (B, latent_size) predicted latent vectors
         labels:    list of B label strings (potato tuber IDs)
         delta_rep: repulsion margin (default 0.5, matching corepp)
     Returns:
-        scalar loss
+        scalar loss (mean over all B² pairs)
     """
+    B = latents.size(0)
     hinged = torch.nn.HingeEmbeddingLoss(margin=delta_rep, reduction='none')
     h_loss = torch.tensor(0.0, device=latents.device)
     for lbl, z in zip(labels, latents):
@@ -75,7 +79,7 @@ def att_rep_loss(latents: torch.Tensor, labels: list, delta_rep: float = 0.5) ->
             dtype=torch.float, device=latents.device,
         )
         h_loss = h_loss + hinged(dist, same).sum()
-    return h_loss
+    return h_loss / (B * B)
 
 
 # ---------------------------------------------------------------------------
@@ -366,35 +370,60 @@ def main(cfg: dict):
         normalize_half_extent=normalize_half_extent,
     )
 
-    # ----- Optional morphology-balanced sampler -----
-    sampler_cfg = cfg.get("sampler", {})
-    use_weighted_sampler = bool(sampler_cfg.get("enabled", False))
-    train_sampler = None
-    if use_weighted_sampler:
-        sample_labels = [lbl for _, lbl, _ in train_ds.samples]
-        sample_weights, _, sampler_stats = _make_sample_weights(
-            sample_labels=sample_labels,
-            target_csv=cfg.get("target_csv", None),
-            trait_col=sampler_cfg.get("trait_column", cfg.get("volume_column", "volume (cm3)")),
-            bin_edges=sampler_cfg.get("bin_edges", None),
-            balance_cultivar=bool(sampler_cfg.get("balance_cultivar", False)),
-            metadata_csv=cfg.get("metadata_csv", None),
-        )
-        train_sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(sample_weights),
-            replacement=True,
-        )
-        print("Weighted sampler enabled:")
-        print(f"  trait={sampler_stats.get('trait_col')} | bins={sampler_stats.get('num_bins_effective')}")
-        print(f"  group counts: {sampler_stats.get('group_counts')}")
-    else:
-        print("Weighted sampler disabled; using standard random shuffle.")
+    # ----- Sampler selection (mutually exclusive) -----
+    # Priority: tuber_sampler > weighted sampler > plain shuffle.
+    tuber_cfg = cfg.get("tuber_sampler", {})
+    use_tuber_sampler = bool(tuber_cfg.get("enabled", False))
 
-    train_loader = DataLoader(
-        train_ds, batch_size=cfg.get('batch_size', 16),
-        shuffle=(train_sampler is None), sampler=train_sampler, num_workers=4,
-    )
+    sampler_cfg = cfg.get("sampler", {})
+    use_weighted_sampler = bool(sampler_cfg.get("enabled", False)) and not use_tuber_sampler
+
+    if use_tuber_sampler and use_weighted_sampler:
+        print("WARNING: tuber_sampler and sampler are both enabled — tuber_sampler takes priority.")
+
+    if use_tuber_sampler:
+        k_scans = int(tuber_cfg.get("k_scans", 2))
+        n_labels = int(tuber_cfg.get("n_labels", 8))
+        label_to_indices = train_ds.get_label_to_indices()
+        batch_sampler = TuberBatchSampler(
+            label_to_indices=label_to_indices,
+            n_labels=n_labels,
+            k_scans=k_scans,
+            drop_last=False,
+        )
+        print(
+            f"TuberBatchSampler enabled: {n_labels} labels × {k_scans} scans "
+            f"= {batch_sampler.batch_size} per batch | "
+            f"{len(batch_sampler)} batches/epoch over {len(batch_sampler._labels)} labels"
+        )
+        train_loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=4)
+    else:
+        train_sampler = None
+        if use_weighted_sampler:
+            sample_labels = [lbl for _, lbl, _ in train_ds.samples]
+            sample_weights, _, sampler_stats = _make_sample_weights(
+                sample_labels=sample_labels,
+                target_csv=cfg.get("target_csv", None),
+                trait_col=sampler_cfg.get("trait_column", cfg.get("volume_column", "volume (cm3)")),
+                bin_edges=sampler_cfg.get("bin_edges", None),
+                balance_cultivar=bool(sampler_cfg.get("balance_cultivar", False)),
+                metadata_csv=cfg.get("metadata_csv", None),
+            )
+            train_sampler = WeightedRandomSampler(
+                weights=sample_weights,
+                num_samples=len(sample_weights),
+                replacement=True,
+            )
+            print("Weighted sampler enabled:")
+            print(f"  trait={sampler_stats.get('trait_col')} | bins={sampler_stats.get('num_bins_effective')}")
+            print(f"  group counts: {sampler_stats.get('group_counts')}")
+        else:
+            print("Weighted sampler disabled; using standard random shuffle.")
+
+        train_loader = DataLoader(
+            train_ds, batch_size=cfg.get('batch_size', 16),
+            shuffle=(train_sampler is None), sampler=train_sampler, num_workers=4,
+        )
     val_loader = DataLoader(
         val_ds, batch_size=cfg.get('batch_size', 16),
         shuffle=False, num_workers=4,
@@ -513,9 +542,14 @@ if __name__ == '__main__':
         help='Override augmentation_enabled in config (true/false)',
     )
     parser.add_argument(
-        '--sampler', dest='sampler_enabled', type=str2bool, default=None,
-        metavar='BOOL',
-        help='Override sampler.enabled in config (true/false)',
+        '--sampler', dest='sampler', default=None,
+        choices=['weighted', 'tuber', 'none'],
+        help=(
+            'Override which sampler to use: '
+            '"weighted" (volume-bin balanced), '
+            '"tuber" (guarantees same-tuber pairs per batch), '
+            '"none" (plain random shuffle)'
+        ),
     )
     parser.add_argument(
         '--contrastive-loss', dest='contrastive_loss', type=str2bool, default=None,
@@ -530,8 +564,9 @@ if __name__ == '__main__':
 
     if args.augmentation_enabled is not None:
         cfg['augmentation_enabled'] = args.augmentation_enabled
-    if args.sampler_enabled is not None:
-        cfg.setdefault('sampler', {})['enabled'] = args.sampler_enabled
+    if args.sampler is not None:
+        cfg.setdefault('sampler', {})['enabled'] = (args.sampler == 'weighted')
+        cfg.setdefault('tuber_sampler', {})['enabled'] = (args.sampler == 'tuber')
     if args.contrastive_loss is not None:
         cfg['contrastive_loss'] = args.contrastive_loss
 

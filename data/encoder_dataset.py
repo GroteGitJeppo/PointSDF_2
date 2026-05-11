@@ -7,7 +7,7 @@ import open3d as o3d
 import pandas as pd
 import torch
 import torch_fpsample
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from torch_geometric.data import Data
 
 from data.sdf_samples import resolve_samples_npz
@@ -294,6 +294,16 @@ class PointCloudLatentDataset(Dataset):
 
         return points
 
+    def get_label_to_indices(self) -> dict[str, list[int]]:
+        """Return a mapping from label → list of dataset indices for that label.
+
+        Used by TuberBatchSampler to guarantee same-label pairs per batch.
+        """
+        mapping: dict[str, list[int]] = {}
+        for i, (_, label, _) in enumerate(self.samples):
+            mapping.setdefault(label, []).append(i)
+        return mapping
+
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -337,3 +347,77 @@ class PointCloudLatentDataset(Dataset):
             data.sdf_gt  = sdf_samples[:, 3:4].unsqueeze(0)  # (1, N_sdf, 1)
 
         return data
+
+
+class TuberBatchSampler(Sampler):
+    """Batch sampler that guarantees same-label (same-tuber) pairs in every batch.
+
+    Each batch contains exactly ``k_scans`` random scans from each of
+    ``n_labels`` randomly chosen tubers, giving an effective batch size of
+    ``n_labels * k_scans``.  This mirrors corepp's natural same-label
+    collision rate and makes the attraction term of AttRepLoss actually fire
+    every step rather than ~30% of the time under uniform random sampling.
+
+    Args:
+        label_to_indices: dict mapping label → list of dataset indices,
+                          as returned by PointCloudLatentDataset.get_label_to_indices().
+        n_labels:         number of distinct tubers per batch.
+        k_scans:          number of scans drawn per tuber per batch.
+        drop_last:        if True, drop the last incomplete batch.
+    """
+
+    def __init__(
+        self,
+        label_to_indices: dict[str, list[int]],
+        n_labels: int,
+        k_scans: int,
+        drop_last: bool = False,
+    ):
+        self.n_labels = n_labels
+        self.k_scans = k_scans
+        self.drop_last = drop_last
+
+        # Only use labels that have at least k_scans scans available
+        self.label_to_indices = {
+            lbl: idxs for lbl, idxs in label_to_indices.items() if len(idxs) >= k_scans
+        }
+        skipped = len(label_to_indices) - len(self.label_to_indices)
+        if skipped:
+            print(
+                f'TuberBatchSampler: skipped {skipped} label(s) with < {k_scans} scans. '
+                f'{len(self.label_to_indices)} labels available.'
+            )
+        self._labels = sorted(self.label_to_indices.keys())
+
+    @property
+    def batch_size(self) -> int:
+        return self.n_labels * self.k_scans
+
+    def __iter__(self):
+        labels = self._labels.copy()
+        np.random.shuffle(labels)
+
+        n_full = len(labels) // self.n_labels
+        for i in range(n_full):
+            chunk = labels[i * self.n_labels: (i + 1) * self.n_labels]
+            batch = []
+            for lbl in chunk:
+                idxs = self.label_to_indices[lbl]
+                chosen = np.random.choice(idxs, size=self.k_scans, replace=False)
+                batch.extend(chosen.tolist())
+            yield batch
+
+        remainder = labels[n_full * self.n_labels:]
+        if remainder and not self.drop_last:
+            batch = []
+            for lbl in remainder:
+                idxs = self.label_to_indices[lbl]
+                chosen = np.random.choice(idxs, size=self.k_scans, replace=False)
+                batch.extend(chosen.tolist())
+            yield batch
+
+    def __len__(self) -> int:
+        n = len(self._labels)
+        if self.drop_last:
+            return n // self.n_labels
+        return (n + self.n_labels - 1) // self.n_labels

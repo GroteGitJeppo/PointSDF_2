@@ -70,6 +70,18 @@ augmentation:
   occlusion_ratio_min: 0.08
   occlusion_ratio_max: 0.28
 
+# ---- Tuber batch sampler (train split only) -----------------
+# Guarantees same-tuber pairs in every batch so the contrastive attraction
+# term actually fires every step (mirrors corepp's natural same-label rate).
+# Each batch contains k_scans scans from each of n_labels randomly chosen
+# tubers → effective batch_size = n_labels * k_scans.
+# Mutually exclusive with the weighted sampler below (tuber_sampler wins).
+# Recommended when contrastive_loss: true.
+tuber_sampler:
+  enabled: false
+  k_scans: 2      # scans per tuber per batch
+  n_labels: 8     # tubers per batch  →  effective batch_size = 16
+
 # ---- Sampler (train split only) -----------------------------
 # Fixed-width 50 ml bins mirroring the PointRAFT weight-class scheme.
 # Each class spans 50 ml; the last bin is open-ended (450+ ml).
