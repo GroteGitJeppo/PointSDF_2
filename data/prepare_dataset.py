@@ -32,7 +32,7 @@ sdf
     Usage::
 
         python data/prepare_dataset.py sdf \\
-            --src   data/3DPotatoTwin/2_sfm/4_pcd \\
+            --src   data/3DPotatoTwin/2_sfm/2_pcd \\
             --out   data/3DPotatoTwin/sdfsamples/potato \\
             --ply_pattern "*_20000.ply"
 
@@ -40,10 +40,26 @@ sdf
     one complete-scan PLY file.  Use ``--ply_pattern`` to match the exact
     filename if there are multiple PLY files per label.
 
+augment
+    Apply random shape augmentations (scale / rotation / shear) to the
+    complete-scan PLYs and generate TSDF ``samples.npz`` for each variant.
+    Augmented shapes are stored as ``<out>/<label>_NN/samples.npz`` (NN = 00…).
+    Pass the output directory as ``augmented_sdf_data_dir`` in
+    ``configs/train_deepsdf.yaml``.
+
+    Usage::
+
+        python data/prepare_dataset.py augment \\
+            --src   data/3DPotatoTwin/2_sfm/2_pcd \\
+            --out   data/3DPotatoTwin/sdfsamples/potato_augmented \\
+            --ply_pattern "*_20000.ply" \\
+            --no_augmentations 10
+
 Adapted from
 ------------
 * ``prepare_3dpotato_dataset.py`` (pcd command) — PointRAFT fork
 * ``corepp/data_preparation/prepare_deepsdf_training_data.py`` (sdf command) — CoRe++ (Blok et al., 2025)
+* ``corepp/data_preparation/augment.py`` (augment command) — CoRe++ (Blok et al., 2025)
 """
 
 import argparse
@@ -292,6 +308,112 @@ def cmd_sdf(args):
 
 
 # ============================================================================
+# augment command — complete PLY → augmented TSDF samples.npz variants
+# ============================================================================
+
+def _augment_pcd(pcd: o3d.geometry.PointCloud, cfg: dict) -> o3d.geometry.PointCloud:
+    """Apply random scale / rotation-Z / shear-X to a point cloud."""
+    import copy
+    tmp = copy.deepcopy(pcd)
+
+    # Isotropic scale (per-axis uniform, matching corepp augment.py)
+    scale = np.random.uniform(cfg['min_scale'], cfg['max_scale'], size=(3,))
+    pts = np.asarray(tmp.points) * scale
+    tmp.points = o3d.utility.Vector3dVector(pts)
+
+    # Rotation around Z axis
+    angle = np.random.uniform(-cfg['max_rotation_deg'], cfg['max_rotation_deg']) * np.pi / 180.0
+    R = o3d.geometry.get_rotation_matrix_from_xyz(np.array([0.0, 0.0, angle]))
+    tmp.rotate(R, center=(0, 0, 0))
+
+    # Shear in X direction (affects Y and Z columns)
+    shear = np.random.uniform(-cfg['max_shear'], cfg['max_shear'], size=(2,))
+    pts = np.asarray(tmp.points).copy()
+    pts[:, 0] += shear[0] * pts[:, 1] + shear[1] * pts[:, 2]
+    tmp.points = o3d.utility.Vector3dVector(pts)
+
+    # Re-centre
+    tmp.translate(-tmp.get_center())
+
+    # Recompute outward normals (needed for TSDF sample generation)
+    tmp.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+    tmp.orient_normals_towards_camera_location(np.array([0.0, 0.0, 0.0]))
+    tmp.normals = o3d.utility.Vector3dVector(-np.asarray(tmp.normals))
+
+    return tmp
+
+
+def cmd_augment(args):
+    """Generate augmented TSDF samples from complete point clouds."""
+    _check_dir(args.out)
+
+    aug_cfg = {
+        'min_scale':        args.min_scale,
+        'max_scale':        args.max_scale,
+        'max_rotation_deg': args.max_rotation_deg,
+        'max_shear':        args.max_shear,
+    }
+
+    labels = sorted(
+        d for d in os.listdir(args.src)
+        if os.path.isdir(os.path.join(args.src, d))
+    )
+    print(f"Found {len(labels)} label folders under {args.src}")
+    print(f"Generating {args.no_augmentations} augmentation(s) per shape → {args.out}")
+
+    skipped = 0
+    for label in labels:
+        label_dir = os.path.join(args.src, label)
+        ply_path  = _find_ply(label_dir, args.ply_pattern)
+
+        if ply_path is None:
+            print(f"  [SKIP] {label}: no PLY file found")
+            skipped += 1
+            continue
+
+        print(f"  {label}: loading {ply_path} ...", flush=True)
+        pcd = o3d.io.read_point_cloud(ply_path)
+        pcd.translate(-pcd.get_center())
+
+        if not pcd.has_normals():
+            pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+            pcd.orient_normals_towards_camera_location(np.array([0.0, 0.0, 0.0]))
+            pcd.normals = o3d.utility.Vector3dVector(-np.asarray(pcd.normals))
+
+        for jdx in range(args.no_augmentations):
+            aug_label = f"{label}_{jdx:02d}"
+            out_dir   = os.path.join(args.out, aug_label)
+            out_path  = os.path.join(out_dir, "samples.npz")
+
+            if os.path.exists(out_path) and not args.overwrite:
+                print(f"    [SKIP] {aug_label}: samples.npz exists (use --overwrite)")
+                continue
+
+            aug_pcd = _augment_pcd(pcd, aug_cfg)
+
+            points    = np.asarray(aug_pcd.points)
+            normals   = np.asarray(aug_pcd.normals)
+            viewpoints = points + normals
+            swl_points = np.concatenate([points, viewpoints], axis=1)
+
+            no_samples_per_point = max(1, int(np.ceil(args.no_samples / len(points))))
+            pos, neg = _generate_tsdf_samples(
+                swl_points, no_samples_per_point,
+                args.tsdf_positive, args.tsdf_negative,
+            )
+
+            rng = np.random.default_rng()
+            pos = pos[rng.choice(len(pos), args.no_samples, replace=len(pos) < args.no_samples)]
+            neg = neg[rng.choice(len(neg), args.no_samples, replace=len(neg) < args.no_samples)]
+
+            _check_dir(out_dir)
+            np.savez(out_path, pos=pos, neg=neg)
+            print(f"    {aug_label}: saved {args.no_samples} pos + neg → {out_path}")
+
+    print(f"\nDone. Skipped {skipped}/{len(labels)} labels (no PLY found).")
+
+
+# ============================================================================
 # Entry point
 # ============================================================================
 
@@ -361,11 +483,72 @@ def main():
         help="Re-generate samples.npz even if it already exists.",
     )
 
+    # ── augment ──────────────────────────────────────────────────────────────
+    p_aug = sub.add_parser(
+        "augment",
+        help="Complete PLY scans → augmented TSDF samples.npz variants",
+    )
+    p_aug.add_argument(
+        "--src", required=True,
+        help="Directory containing one sub-folder per label, each with a complete PLY scan "
+             "(same source as the 'sdf' command).",
+    )
+    p_aug.add_argument(
+        "--out", required=True,
+        help=(
+            "Output root directory.  Each augmented variant is saved as "
+            "<out>/<label>_NN/samples.npz (NN = 00, 01, …)."
+        ),
+    )
+    p_aug.add_argument(
+        "--ply_pattern", default="*.ply",
+        help="Glob pattern to locate the PLY file within each label folder (default: '*.ply'). "
+             "Example: '*_20000.ply'.",
+    )
+    p_aug.add_argument(
+        "--no_augmentations", default=10, type=int,
+        help="Number of augmented variants per shape (default: 10).",
+    )
+    p_aug.add_argument(
+        "--no_samples", default=100_000, type=int,
+        help="Number of positive and negative TSDF samples per augmented shape (default: 100000).",
+    )
+    p_aug.add_argument(
+        "--min_scale", default=0.8, type=float,
+        help="Minimum per-axis scale factor (default: 0.8).",
+    )
+    p_aug.add_argument(
+        "--max_scale", default=1.2, type=float,
+        help="Maximum per-axis scale factor (default: 1.2).",
+    )
+    p_aug.add_argument(
+        "--max_rotation_deg", default=30.0, type=float,
+        help="Maximum rotation around Z axis in degrees (default: 30).",
+    )
+    p_aug.add_argument(
+        "--max_shear", default=0.1, type=float,
+        help="Maximum shear magnitude in X direction (default: 0.1).",
+    )
+    p_aug.add_argument(
+        "--tsdf_positive", default=0.04, type=float,
+        help="Max outward (positive) SDF offset in metres (default: 0.04).",
+    )
+    p_aug.add_argument(
+        "--tsdf_negative", default=0.01, type=float,
+        help="Max inward (negative) SDF offset in metres (default: 0.01).",
+    )
+    p_aug.add_argument(
+        "--overwrite", action="store_true",
+        help="Re-generate samples.npz even if it already exists.",
+    )
+
     args = parser.parse_args()
     if args.command == "pcd":
         cmd_pcd(args)
-    else:
+    elif args.command == "sdf":
         cmd_sdf(args)
+    else:
+        cmd_augment(args)
 
 
 if __name__ == "__main__":
