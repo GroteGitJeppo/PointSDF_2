@@ -496,9 +496,43 @@ def main(cfg: dict):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Stage 2: encoder training')
     parser.add_argument('--config', '-c', required=True, help='Path to YAML config file')
+
+    # Per-run overrides — set these in your SLURM script instead of editing the YAML.
+    # Each flag overrides the corresponding key in the config when provided.
+    # Usage: --augmentation true  /  --augmentation false
+    def str2bool(v):
+        if v.lower() in ('true', '1', 'yes'):
+            return True
+        if v.lower() in ('false', '0', 'no'):
+            return False
+        raise argparse.ArgumentTypeError(f"Expected true/false, got: {v!r}")
+
+    parser.add_argument(
+        '--augmentation', dest='augmentation_enabled', type=str2bool, default=None,
+        metavar='BOOL',
+        help='Override augmentation_enabled in config (true/false)',
+    )
+    parser.add_argument(
+        '--sampler', dest='sampler_enabled', type=str2bool, default=None,
+        metavar='BOOL',
+        help='Override sampler.enabled in config (true/false)',
+    )
+    parser.add_argument(
+        '--contrastive-loss', dest='contrastive_loss', type=str2bool, default=None,
+        metavar='BOOL',
+        help='Override contrastive_loss in config (true/false)',
+    )
+
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
+
+    if args.augmentation_enabled is not None:
+        cfg['augmentation_enabled'] = args.augmentation_enabled
+    if args.sampler_enabled is not None:
+        cfg.setdefault('sampler', {})['enabled'] = args.sampler_enabled
+    if args.contrastive_loss is not None:
+        cfg['contrastive_loss'] = args.contrastive_loss
 
     main(cfg)

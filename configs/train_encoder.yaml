@@ -69,7 +69,7 @@ augmentation:
 # Each class spans 50 ml; the last bin is open-ended (450+ ml).
 # Omit bin_edges to use this default; override with a custom list if needed.
 sampler:
-  enabled: true
+  enabled: false
   trait_column: "volume (cm3)"   # from target_csv
   bin_edges: [0, 50, 100, 150, 200, 250, 300, 350, 400, 450, .inf]
   balance_cultivar: false         # if true, balances by bin x cultivar group
