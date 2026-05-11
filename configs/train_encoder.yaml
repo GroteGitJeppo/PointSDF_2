@@ -101,7 +101,7 @@ grid_bbox:       0.15        # half-extent of the bounding box (metres)
 #
 #
 # Then replace the placeholder below with the printed values:
-grid_center: [-0.001390, 0.001177, 0.102020]
+#grid_center: [-0.001390, 0.001177, 0.102020]
 # grid_center: [-0.001388, 0.001177, 0.102020]
 # Optional hierarchical decode (test.py): coarse grid + surface cells + fine
 # samples inside dilated cells. When hierarchical_decode is true, grid_resolution

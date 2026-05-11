@@ -76,5 +76,5 @@ setup(
     package_data={"": ["*.pyi"]},
     cmdclass={"build_ext": cpp_extension.BuildExtension},
     python_requires=">=3.8",
-    install_requires=["torch==2.0"],
+    install_requires=["torch>=2.0"],
 )
