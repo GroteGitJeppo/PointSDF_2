@@ -26,12 +26,6 @@ dependencies:
   - tqdm
   - pyyaml
 
-  # ── Open3D via conda-forge (statically linked, works on older glibc / HPC) ─
-  # Pinned to >=0.18 so either 0.18 or 0.19 is accepted depending on platform.
-  # Remove this line and use the pip entry below if you need exactly 0.19 on
-  # a glibc >=2.28 system (e.g. Ubuntu 22.04).
-  - conda-forge::open3d>=0.18
-
   # ── pip-installed packages ─────────────────────────────────────────────────
   - pip
   - pip:
@@ -50,6 +44,11 @@ dependencies:
     - torch_scatter==2.1.2
     - torch_sparse==0.6.18
     - torch_spline_conv==1.2.2
+
+    # Point cloud I/O, visualisation, and GPU-accelerated convex hull for volume extraction.
+    # Requires glibc >= 2.28 (manylinux_2_28 wheel). Ubuntu 20.04+ and most 2022+
+    # HPC nodes satisfy this. Run `ldd --version` to confirm before creating the env.
+    - open3d==0.19.0
 
     # Computer vision
     # Matches INSTALL.md: opencv-python==4.12.0.88
