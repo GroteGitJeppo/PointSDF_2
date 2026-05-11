@@ -65,10 +65,13 @@ augmentation:
   occlusion_ratio_max: 0.28
 
 # ---- Sampler (train split only) -----------------------------
+# Fixed-width 50 ml bins mirroring the PointRAFT weight-class scheme.
+# Each class spans 50 ml; the last bin is open-ended (450+ ml).
+# Omit bin_edges to use this default; override with a custom list if needed.
 sampler:
   enabled: true
   trait_column: "volume (cm3)"   # from target_csv
-  num_bins: 10                     # quantile bins for inverse-frequency weights
+  bin_edges: [0, 50, 100, 150, 200, 250, 300, 350, 400, 450, .inf]
   balance_cultivar: false         # if true, balances by bin x cultivar group
 
 # ---- End-to-end SDF loss (Stage 2) -------------------------

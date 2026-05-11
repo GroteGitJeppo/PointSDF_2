@@ -190,18 +190,26 @@ def _make_sample_weights(
     sample_labels: list[str],
     target_csv: str | None,
     trait_col: str = "volume (cm3)",
-    num_bins: int = 4,
+    bin_edges: list[float] | None = None,
     balance_cultivar: bool = False,
     metadata_csv: str | None = None,
 ) -> tuple[torch.Tensor, list[str], dict]:
     """
-    Build inverse-frequency sample weights by morphology bins (optionally x cultivar).
+    Build inverse-frequency sample weights using fixed-width volume bins.
+
+    Mirrors the PointRAFT approach: fixed 50 ml boundaries (0, 50, 100, …, 450, inf)
+    produce 10 classes whose sampling probability is inversely proportional to how
+    many training samples fall in each class.
 
     Returns:
         weights: (N_samples,) float tensor
-        keys:    per-sample key used for balancing (e.g., 'bin_1|Kitahime')
+        keys:    per-sample key used for balancing (e.g., '100-150|Kitahime')
         stats:   summary dict for logging
     """
+    # Default: 50 ml-wide bins matching PointRAFT's weight classes
+    if bin_edges is None:
+        bin_edges = [0, 50, 100, 150, 200, 250, 300, 350, 400, 450, float("inf")]
+
     n = len(sample_labels)
     if n == 0 or not target_csv:
         return torch.ones(n, dtype=torch.double), ["all"] * n, {"mode": "uniform"}
@@ -218,24 +226,29 @@ def _make_sample_weights(
     vals = pd.to_numeric(
         target_df.reindex(unique_labels)[trait_col], errors="coerce"
     )
-    valid = vals.dropna()
+
+    edges = sorted(bin_edges)
+    bin_labels = [
+        f"{int(edges[i])}-{int(edges[i+1])}" if edges[i+1] != float("inf")
+        else f"{int(edges[i])}+"
+        for i in range(len(edges) - 1)
+    ]
 
     label_to_bin: dict[str, str] = {}
-    if len(valid) >= 4 and int(num_bins) > 1:
-        q = int(min(num_bins, valid.nunique()))
-        if q > 1:
-            bins = pd.qcut(valid, q=q, labels=False, duplicates="drop")
-            for lbl, b in bins.items():
-                label_to_bin[lbl] = f"bin_{int(b)}"
-        else:
-            for lbl in unique_labels:
-                label_to_bin[lbl] = "bin_0"
-    else:
-        for lbl in unique_labels:
-            label_to_bin[lbl] = "bin_0"
-
     for lbl in unique_labels:
-        label_to_bin.setdefault(lbl, "bin_missing")
+        v = vals.get(lbl, float("nan"))
+        if pd.isna(v):
+            label_to_bin[lbl] = "bin_missing"
+            continue
+        assigned = False
+        for i in range(len(edges) - 1):
+            if edges[i] <= v < edges[i + 1]:
+                label_to_bin[lbl] = bin_labels[i]
+                assigned = True
+                break
+        if not assigned:
+            # Value exactly equals the last edge or exceeds it
+            label_to_bin[lbl] = bin_labels[-1]
 
     label_to_cultivar: dict[str, str] = {lbl: "cultivar_unknown" for lbl in unique_labels}
     if balance_cultivar:
@@ -264,10 +277,10 @@ def _make_sample_weights(
     )
 
     stats = {
-        "mode": "morphology_weighted",
+        "mode": "fixed_width_bins",
         "trait_col": trait_col,
-        "num_bins_requested": int(num_bins),
-        "num_bins_effective": len({v for v in label_to_bin.values()}),
+        "bin_edges": edges,
+        "num_bins_effective": len({v for v in label_to_bin.values() if v != "bin_missing"}),
         "balance_cultivar": bool(balance_cultivar),
         "group_counts": dict(sorted(counts.items(), key=lambda kv: kv[1], reverse=True)),
     }
@@ -363,7 +376,7 @@ def main(cfg: dict):
             sample_labels=sample_labels,
             target_csv=cfg.get("target_csv", None),
             trait_col=sampler_cfg.get("trait_column", cfg.get("volume_column", "volume (cm3)")),
-            num_bins=int(sampler_cfg.get("num_bins", 4)),
+            bin_edges=sampler_cfg.get("bin_edges", None),
             balance_cultivar=bool(sampler_cfg.get("balance_cultivar", False)),
             metadata_csv=cfg.get("metadata_csv", None),
         )
