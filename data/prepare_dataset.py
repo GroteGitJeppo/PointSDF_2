@@ -47,13 +47,23 @@ augment
     Pass the output directory as ``augmented_sdf_data_dir`` in
     ``configs/train_deepsdf.yaml``.
 
-    Usage::
+    To generate regular + augmented samples in a single pass, use the
+    ``sdf`` command with ``--augment_out`` instead.
+
+    Usage (augmented only)::
 
         python data/prepare_dataset.py augment \\
             --src   data/3DPotatoTwin/2_sfm/2_pcd \\
             --out   data/3DPotatoTwin/sdfsamples/potato_augmented \\
-            --ply_pattern "*_20000.ply" \\
-            --no_augmentations 10
+            --ply_pattern "*_20000.ply"
+
+    Usage (regular + augmented in one pass)::
+
+        python data/prepare_dataset.py sdf \\
+            --src         data/3DPotatoTwin/2_sfm/2_pcd \\
+            --out         data/3DPotatoTwin/sdfsamples/potato \\
+            --augment_out data/3DPotatoTwin/sdfsamples/potato_augmented \\
+            --ply_pattern "*_20000.ply"
 
 Adapted from
 ------------
@@ -239,9 +249,53 @@ def _find_ply(label_dir: str, ply_pattern: str) -> str | None:
     return matches[0] if matches else None
 
 
+def _ensure_normals(pcd: o3d.geometry.PointCloud) -> None:
+    """Estimate outward-pointing normals in-place if the cloud has none."""
+    if not pcd.has_normals():
+        pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+        pcd.orient_normals_towards_camera_location(np.array([0.0, 0.0, 0.0]))
+        pcd.normals = o3d.utility.Vector3dVector(-np.asarray(pcd.normals))
+
+
+def _samples_from_pcd(
+    pcd: o3d.geometry.PointCloud,
+    no_samples: int,
+    tsdf_positive: float,
+    tsdf_negative: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (pos, neg) TSDF sample arrays of shape (no_samples, 4) each."""
+    points     = np.asarray(pcd.points)
+    normals    = np.asarray(pcd.normals)
+    viewpoints = points + normals
+    swl_points = np.concatenate([points, viewpoints], axis=1)
+
+    no_samples_per_point = max(1, int(np.ceil(no_samples / len(points))))
+    pos, neg = _generate_tsdf_samples(swl_points, no_samples_per_point,
+                                      tsdf_positive, tsdf_negative)
+
+    rng = np.random.default_rng()
+    pos = pos[rng.choice(len(pos), no_samples, replace=len(pos) < no_samples)]
+    neg = neg[rng.choice(len(neg), no_samples, replace=len(neg) < no_samples)]
+    return pos, neg
+
+
 def cmd_sdf(args):
-    """Generate TSDF samples from complete point clouds."""
+    """Generate TSDF samples (and optionally augmented variants) from complete point clouds."""
     _check_dir(args.out)
+    do_augment = bool(getattr(args, 'augment_out', None))
+    if do_augment:
+        _check_dir(args.augment_out)
+        aug_cfg = {
+            'min_scale':        args.min_scale,
+            'max_scale':        args.max_scale,
+            'max_rotation_deg': args.max_rotation_deg,
+            'max_shear':        args.max_shear,
+        }
+        print(
+            f"Augmentation enabled: {args.no_augmentations} variants/shape → {args.augment_out}\n"
+            f"  scale [{args.min_scale}, {args.max_scale}], "
+            f"rotation ±{args.max_rotation_deg}°, shear ±{args.max_shear}"
+        )
 
     labels = sorted(
         d for d in os.listdir(args.src)
@@ -259,50 +313,38 @@ def cmd_sdf(args):
             skipped += 1
             continue
 
+        print(f"  {label}: loading {ply_path} ...", flush=True)
+        pcd = o3d.io.read_point_cloud(ply_path)
+        # Centre so SDF origin matches the encoder's T.Center() on partial scans.
+        pcd.translate(-pcd.get_center())
+        _ensure_normals(pcd)
+
+        # ── regular samples ──────────────────────────────────────────────────
         out_dir  = os.path.join(args.out, label)
         out_path = os.path.join(out_dir, "samples.npz")
         if os.path.exists(out_path) and not args.overwrite:
-            print(f"  [SKIP] {label}: samples.npz already exists (use --overwrite)")
-            continue
+            print(f"    [SKIP] {label}: samples.npz exists (use --overwrite)")
+        else:
+            pos, neg = _samples_from_pcd(pcd, args.no_samples,
+                                         args.tsdf_positive, args.tsdf_negative)
+            _check_dir(out_dir)
+            np.savez(out_path, pos=pos, neg=neg)
+            print(f"    saved {args.no_samples} pos + neg → {out_path}")
 
-        print(f"  {label}: loading {ply_path} ...", flush=True)
-        pcd = o3d.io.read_point_cloud(ply_path)
-
-        # Centre the point cloud so the SDF origin matches the encoder's
-        # pre_transform = T.Center() applied to the partial scan.
-        pcd.translate(-pcd.get_center())
-
-        if not pcd.has_normals():
-            print(f"    estimating normals ...", flush=True)
-            pcd.estimate_normals(
-                search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30)
-            )
-            # Orient normals consistently away from centroid (origin after centring).
-            pcd.orient_normals_towards_camera_location(np.array([0.0, 0.0, 0.0]))
-            # Flip so normals point outward (away from centroid = outward for convex shapes).
-            pcd.normals = o3d.utility.Vector3dVector(
-                -np.asarray(pcd.normals)
-            )
-
-        points     = np.asarray(pcd.points)
-        normals    = np.asarray(pcd.normals)
-        viewpoints = points + normals           # one unit along the outward normal
-        swl_points = np.concatenate([points, viewpoints], axis=1)  # (N, 6)
-
-        no_samples_per_point = max(1, int(np.ceil(args.no_samples / len(points))))
-        pos, neg = _generate_tsdf_samples(
-            swl_points, no_samples_per_point,
-            args.tsdf_positive, args.tsdf_negative,
-        )
-
-        # Randomly subsample to exactly --no_samples
-        rng = np.random.default_rng()
-        pos = pos[rng.choice(len(pos), args.no_samples, replace=len(pos) < args.no_samples)]
-        neg = neg[rng.choice(len(neg), args.no_samples, replace=len(neg) < args.no_samples)]
-
-        _check_dir(out_dir)
-        np.savez(out_path, pos=pos, neg=neg)
-        print(f"    saved {args.no_samples} pos + {args.no_samples} neg → {out_path}")
+        # ── augmented variants ───────────────────────────────────────────────
+        if do_augment:
+            for jdx in range(args.no_augmentations):
+                aug_label = f"{label}_{jdx:02d}"
+                aug_out   = os.path.join(args.augment_out, aug_label, "samples.npz")
+                if os.path.exists(aug_out) and not args.overwrite:
+                    print(f"    [SKIP] {aug_label}: samples.npz exists")
+                    continue
+                aug_pcd = _augment_pcd(pcd, aug_cfg)
+                pos, neg = _samples_from_pcd(aug_pcd, args.no_samples,
+                                             args.tsdf_positive, args.tsdf_negative)
+                _check_dir(os.path.dirname(aug_out))
+                np.savez(aug_out, pos=pos, neg=neg)
+                print(f"    {aug_label}: saved → {aug_out}")
 
     print(f"\nDone. Skipped {skipped}/{len(labels)} labels.")
 
@@ -344,9 +386,8 @@ def _augment_pcd(pcd: o3d.geometry.PointCloud, cfg: dict) -> o3d.geometry.PointC
 
 
 def cmd_augment(args):
-    """Generate augmented TSDF samples from complete point clouds."""
+    """Generate augmented TSDF samples from complete point clouds (augment-only mode)."""
     _check_dir(args.out)
-
     aug_cfg = {
         'min_scale':        args.min_scale,
         'max_scale':        args.max_scale,
@@ -359,7 +400,11 @@ def cmd_augment(args):
         if os.path.isdir(os.path.join(args.src, d))
     )
     print(f"Found {len(labels)} label folders under {args.src}")
-    print(f"Generating {args.no_augmentations} augmentation(s) per shape → {args.out}")
+    print(
+        f"Generating {args.no_augmentations} variants/shape → {args.out}\n"
+        f"  scale [{args.min_scale}, {args.max_scale}], "
+        f"rotation ±{args.max_rotation_deg}°, shear ±{args.max_shear}"
+    )
 
     skipped = 0
     for label in labels:
@@ -374,41 +419,22 @@ def cmd_augment(args):
         print(f"  {label}: loading {ply_path} ...", flush=True)
         pcd = o3d.io.read_point_cloud(ply_path)
         pcd.translate(-pcd.get_center())
-
-        if not pcd.has_normals():
-            pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
-            pcd.orient_normals_towards_camera_location(np.array([0.0, 0.0, 0.0]))
-            pcd.normals = o3d.utility.Vector3dVector(-np.asarray(pcd.normals))
+        _ensure_normals(pcd)
 
         for jdx in range(args.no_augmentations):
             aug_label = f"{label}_{jdx:02d}"
-            out_dir   = os.path.join(args.out, aug_label)
-            out_path  = os.path.join(out_dir, "samples.npz")
+            out_path  = os.path.join(args.out, aug_label, "samples.npz")
 
             if os.path.exists(out_path) and not args.overwrite:
                 print(f"    [SKIP] {aug_label}: samples.npz exists (use --overwrite)")
                 continue
 
             aug_pcd = _augment_pcd(pcd, aug_cfg)
-
-            points    = np.asarray(aug_pcd.points)
-            normals   = np.asarray(aug_pcd.normals)
-            viewpoints = points + normals
-            swl_points = np.concatenate([points, viewpoints], axis=1)
-
-            no_samples_per_point = max(1, int(np.ceil(args.no_samples / len(points))))
-            pos, neg = _generate_tsdf_samples(
-                swl_points, no_samples_per_point,
-                args.tsdf_positive, args.tsdf_negative,
-            )
-
-            rng = np.random.default_rng()
-            pos = pos[rng.choice(len(pos), args.no_samples, replace=len(pos) < args.no_samples)]
-            neg = neg[rng.choice(len(neg), args.no_samples, replace=len(neg) < args.no_samples)]
-
-            _check_dir(out_dir)
+            pos, neg = _samples_from_pcd(aug_pcd, args.no_samples,
+                                         args.tsdf_positive, args.tsdf_negative)
+            _check_dir(os.path.dirname(out_path))
             np.savez(out_path, pos=pos, neg=neg)
-            print(f"    {aug_label}: saved {args.no_samples} pos + neg → {out_path}")
+            print(f"    {aug_label}: saved → {out_path}")
 
     print(f"\nDone. Skipped {skipped}/{len(labels)} labels (no PLY found).")
 
@@ -482,6 +508,25 @@ def main():
         "--overwrite", action="store_true",
         help="Re-generate samples.npz even if it already exists.",
     )
+    # ── optional augmentation pass (combined mode) ────────────────────────
+    p_sdf.add_argument(
+        "--augment_out", default=None,
+        help=(
+            "If set, also generate augmented variants and save them here "
+            "(e.g. data/3DPotatoTwin/sdfsamples/potato_augmented). "
+            "Runs both regular and augmented SDF generation in a single pass."
+        ),
+    )
+    p_sdf.add_argument("--no_augmentations", default=10, type=int,
+                       help="Augmented variants per shape when --augment_out is set (default: 10).")
+    p_sdf.add_argument("--min_scale",        default=0.5,  type=float,
+                       help="Min per-axis scale factor for augmentation (default: 0.5).")
+    p_sdf.add_argument("--max_scale",        default=2.0,  type=float,
+                       help="Max per-axis scale factor for augmentation (default: 2.0).")
+    p_sdf.add_argument("--max_rotation_deg", default=30.0, type=float,
+                       help="Max rotation around Z in degrees for augmentation (default: 30).")
+    p_sdf.add_argument("--max_shear",        default=0.5,  type=float,
+                       help="Max shear magnitude for augmentation (default: 0.5).")
 
     # ── augment ──────────────────────────────────────────────────────────────
     p_aug = sub.add_parser(
@@ -514,20 +559,20 @@ def main():
         help="Number of positive and negative TSDF samples per augmented shape (default: 100000).",
     )
     p_aug.add_argument(
-        "--min_scale", default=0.8, type=float,
-        help="Minimum per-axis scale factor (default: 0.8).",
+        "--min_scale", default=0.5, type=float,
+        help="Minimum per-axis scale factor (default: 0.5).",
     )
     p_aug.add_argument(
-        "--max_scale", default=1.2, type=float,
-        help="Maximum per-axis scale factor (default: 1.2).",
+        "--max_scale", default=2.0, type=float,
+        help="Maximum per-axis scale factor (default: 2.0).",
     )
     p_aug.add_argument(
         "--max_rotation_deg", default=30.0, type=float,
         help="Maximum rotation around Z axis in degrees (default: 30).",
     )
     p_aug.add_argument(
-        "--max_shear", default=0.1, type=float,
-        help="Maximum shear magnitude in X direction (default: 0.1).",
+        "--max_shear", default=0.5, type=float,
+        help="Maximum shear magnitude in X direction (default: 0.5).",
     )
     p_aug.add_argument(
         "--tsdf_positive", default=0.04, type=float,
