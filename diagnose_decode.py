@@ -112,10 +112,8 @@ def main(cfg: dict, split: str) -> None:
                 continue
 
             latent = torch.load(pth, weights_only=True, map_location=device)
-            # Normalise to (1, L) regardless of saved shape
-            if latent.dim() == 1:
-                latent = latent.unsqueeze(0)
-            latent = latent.float()
+            # Normalise to (1, L) regardless of saved shape (may be 1-D, 2-D, or 3-D)
+            latent = latent.float().reshape(1, -1)
 
             latent_stats["norm"].append(float(latent.norm()))
             latent_stats["mean"].append(float(latent.mean()))
