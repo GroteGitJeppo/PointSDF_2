@@ -90,7 +90,7 @@ lambda_attraction:  0.05      # weight applied to AttRepLoss (matches corepp sup
 delta_rep:          0.5       # margin for repulsion hinge loss
 
 # ---- Inference / test settings -----------------------------
-grid_resolution: 20          # resolution^3 SDF query points per sample (uniform mode only)
+grid_resolution: 64          # resolution^3 SDF query points per sample (uniform mode only)
 grid_bbox:       0.15        # half-extent of the bounding box (metres)
 
 # grid_center: the mean centroid of the complete laser scans (in the scanner
