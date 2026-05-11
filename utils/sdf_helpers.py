@@ -71,12 +71,17 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
         idx = torch.randperm(keep_points.shape[0], device=keep_points.device)[:MAX_HULL_POINTS]
         keep_points = keep_points[idx].contiguous()
 
-    o3d_t = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(keep_points))
-    pcd_gpu = o3d.t.geometry.PointCloud(o3d_t)
+    # Move to CPU before handing to Open3D. The conda-forge open3d build ships
+    # without CUDA support (BUILD_CUDA_MODULE=OFF), so passing a CUDA tensor via
+    # DLPack would raise "Unsupported device CUDA:0". The hull runs on ≤1500
+    # points so CPU overhead is negligible.
+    keep_points_cpu = keep_points.cpu().contiguous()
+    o3d_t = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(keep_points_cpu))
+    pcd_cpu = o3d.t.geometry.PointCloud(o3d_t)
 
     voxel_size = 0.0
-    hull_gpu = pcd_gpu.compute_convex_hull()
-    mesh = _clean_mesh(hull_gpu.to_legacy())
+    hull = pcd_cpu.compute_convex_hull()
+    mesh = _clean_mesh(hull.to_legacy())
 
     while not mesh.is_watertight():
         voxel_size += 0.005  # match corepp/utils.sdf2mesh_cuda
@@ -85,9 +90,9 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
                 "Could not produce a watertight mesh after progressive "
                 "voxel downsampling."
             )
-        down_pcd = pcd_gpu.voxel_down_sample(voxel_size=voxel_size)
-        hull_gpu = down_pcd.compute_convex_hull()
-        mesh = _clean_mesh(hull_gpu.to_legacy())
+        down_pcd = pcd_cpu.voxel_down_sample(voxel_size=voxel_size)
+        hull = down_pcd.compute_convex_hull()
+        mesh = _clean_mesh(hull.to_legacy())
 
     return mesh
 
