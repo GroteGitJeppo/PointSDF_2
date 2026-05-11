@@ -63,6 +63,12 @@ dependencies:
     # Experiment logging
     - tensorboard
 
+    # Pin build tools to versions compatible with pytorch_fpsample's setup.py.
+    # setuptools>=80 removed pkg_resources from torch.utils.cpp_extension path;
+    # numpy>=2 breaks torch 2.x imports during the build metadata step.
+    - "setuptools<80"
+    - "numpy<2"
+
     # NOTE: pytorch_fpsample must be installed manually after activating this
     # environment. See INSTALL.md for instructions:
     #   cd pytorch_fpsample && pip install --no-deps --no-build-isolation .
