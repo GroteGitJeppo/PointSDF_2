@@ -325,6 +325,8 @@ def main(cfg: dict):
     if not use_augmentation:
         print('Augmentation disabled (augmentation_enabled: false).')
 
+    normalize_half_extent = float(cfg.get('normalize_half_extent', 0.05))
+
     train_ds = PointCloudLatentDataset(
         data_root=cfg['data_root'],
         splits_csv=cfg['splits_csv'],
@@ -336,6 +338,7 @@ def main(cfg: dict):
         sdf_data_dir=sdf_data_dir,
         sdf_samples_per_shape=sdf_samples,
         sdf_clamp_value=sdf_clamp,
+        normalize_half_extent=normalize_half_extent,
     )
     val_ds = PointCloudLatentDataset(
         data_root=cfg['data_root'],
@@ -347,6 +350,7 @@ def main(cfg: dict):
         sdf_data_dir=sdf_data_dir,
         sdf_samples_per_shape=sdf_samples,
         sdf_clamp_value=sdf_clamp,
+        normalize_half_extent=normalize_half_extent,
     )
 
     # ----- Optional morphology-balanced sampler -----

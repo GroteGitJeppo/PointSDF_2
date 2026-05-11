@@ -38,22 +38,27 @@ class PointNetEncoder(torch.nn.Module):
     """
     PointNet++ encoder: partial point cloud → latent code of size `latent_size`.
 
-    Three-level hierarchy tuned for potato geometry (max ~10 cm per axis):
-      SA1  r=0.02 m — small local surface patch
-      SA2  r=0.04 m — medium neighbourhood covering most of the potato
+    Three-level hierarchy tuned for potato geometry normalised to a half-extent
+    of 0.05 m (coordinates in [-0.05, 0.05]^3 after centering + normalisation):
+      SA1  r=0.01 m — small local surface patch
+      SA2  r=0.02 m — medium neighbourhood covering most of the potato
       SA3  GlobalSA — full-shape aggregation
+
+    The per-cloud scale ratio (original_half_extent / 0.05) is concatenated to
+    the 1024-dim global feature before the latent head so that the encoder can
+    recover metric size information lost during normalisation.
     """
 
     def __init__(self, latent_size: int = 32):
         super().__init__()
         self.latent_size = latent_size
 
-        self.sa1_module = SAModule(0.5, 0.02, MLP([3, 64, 64, 128]))
-        self.sa2_module = SAModule(0.25, 0.04, MLP([128 + 3, 128, 128, 256]))
+        self.sa1_module = SAModule(0.5, 0.01, MLP([3, 64, 64, 128]))
+        self.sa2_module = SAModule(0.25, 0.02, MLP([128 + 3, 128, 128, 256]))
         self.sa3_module = GlobalSAModule(MLP([256 + 3, 256, 512, 1024]))
 
         self.latent_head = nn.Sequential(
-            nn.Linear(1024, 512),
+            nn.Linear(1025, 512),   # 1024 global features + 1 scale scalar
             nn.BatchNorm1d(512),
             nn.LeakyReLU(0.2),
             nn.Dropout(0.3),
@@ -63,7 +68,10 @@ class PointNetEncoder(torch.nn.Module):
     def forward(self, data):
         """
         Args:
-            data: PyG Data with data.pos (N_total, 3) and data.batch (N_total,)
+            data: PyG Data/Batch with:
+                data.pos   (N_total, 3)  — normalised, centred point coordinates
+                data.batch (N_total,)    — batch index per point
+                data.scale (B, 1) or (B,) — per-cloud scale ratio
         Returns:
             latent: (B, latent_size)
         """
@@ -71,5 +79,7 @@ class PointNetEncoder(torch.nn.Module):
         sa1_out = self.sa1_module(*sa0_out)
         sa2_out = self.sa2_module(*sa1_out)
         sa3_out = self.sa3_module(*sa2_out)
-        x, _, _ = sa3_out
+        x, _, _ = sa3_out                          # (B, 1024)
+        scale = data.scale.view(-1, 1)             # (B, 1)
+        x = torch.cat([x, scale], dim=1)           # (B, 1025)
         return self.latent_head(x)

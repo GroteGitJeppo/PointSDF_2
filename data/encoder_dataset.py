@@ -31,7 +31,9 @@ class PointCloudLatentDataset(Dataset):
     exists are kept (a warning is printed for excluded labels).
 
     Each __getitem__ returns a PyG Data object with:
-        data.pos        — (num_points, 3) centred and FPS-sampled point cloud
+        data.pos        — (num_points, 3) centred, normalised, FPS-sampled point cloud
+        data.scale      — (1,) ratio original_half_extent / normalize_half_extent;
+                          multiply normalised coords by this to recover metric coords
         data.latent     — (1, latent_size) ground-truth latent code
         data.sdf_xyz    — (1, sdf_samples_per_shape, 3) SDF query points
                           (only when sdf_data_dir is configured)
@@ -51,12 +53,14 @@ class PointCloudLatentDataset(Dataset):
         sdf_data_dir: str | None = None,
         sdf_samples_per_shape: int = 1024,
         sdf_clamp_value: float | None = None,
+        normalize_half_extent: float = 0.05,
     ):
         self.latent_dir = latent_dir
         self.num_points = num_points
         self.apply_augmentation = apply_augmentation
         self._sdf_samples_per_shape = sdf_samples_per_shape
         self._sdf_clamp = sdf_clamp_value
+        self.normalize_half_extent = normalize_half_extent
         self.augmentation_cfg = self._parse_augmentation_cfg(augmentation_cfg)
 
         splits_df = pd.read_csv(splits_csv)
@@ -167,6 +171,18 @@ class PointCloudLatentDataset(Dataset):
     def _center_points(self, points: torch.Tensor) -> torch.Tensor:
         center = points.mean(dim=0, keepdim=True)
         return points - center
+
+    def _normalize_points(self, points: torch.Tensor) -> tuple[torch.Tensor, float]:
+        """Scale points isotropically so the max absolute coordinate equals
+        normalize_half_extent.  Returns the normalised points and the scale
+        ratio (original_half_extent / normalize_half_extent) needed to recover
+        metric coordinates: metric_coord = normalised_coord * scale.
+        """
+        max_half_extent = points.abs().max().item()
+        if max_half_extent < 1e-6:
+            return points, 1.0
+        scale = max_half_extent / self.normalize_half_extent
+        return points / scale, scale
 
     def _enforce_num_points(self, points: torch.Tensor) -> torch.Tensor:
         n = points.size(0)
@@ -287,10 +303,12 @@ class PointCloudLatentDataset(Dataset):
         pcd = o3d.io.read_point_cloud(ply_path)
         points = torch.tensor(np.asarray(pcd.points), dtype=torch.float)
         points = self._center_points(points)
+        points, scale = self._normalize_points(points)
         points = self._enforce_num_points(points)
         if self.apply_augmentation:
             points = self._augment_points(points)
         data = Data(pos=points)
+        data.scale = torch.tensor([scale], dtype=torch.float)
 
         latent = self.latents_dict[label]  # (latent_size,) — pre-loaded at init
         # Shape (1, latent_size) so PyG's Batch concatenates to (B, latent_size)
