@@ -137,7 +137,7 @@ class PointCloudLatentDataset(Dataset):
         """
         latents: dict[str, torch.Tensor] = {}
         for label, path in label_to_path.items():
-            latents[label] = torch.load(path, weights_only=True, map_location='cpu').detach()
+            latents[label] = torch.load(path, weights_only=True, map_location='cpu').detach().reshape(-1)
         return latents
 
     def _parse_augmentation_cfg(self, cfg: dict | None) -> dict:
