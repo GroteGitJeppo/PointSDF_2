@@ -113,7 +113,7 @@ delta_rep:          0.5       # margin for repulsion hinge loss
 
 # ---- Inference / test settings -----------------------------
 grid_resolution: 64          # resolution^3 SDF query points per sample (uniform mode only)
-grid_bbox:       0.05        # half-extent of the bounding box (metres) — matches normalize_half_extent
+grid_bbox:       0.1        # half-extent of the bounding box (metres) — matches normalize_half_extent
 
 # grid_center: the mean centroid of the complete laser scans (in the scanner
 # coordinate frame).  The corepp decoder was trained on *uncentered* scans, so
@@ -122,8 +122,6 @@ grid_bbox:       0.05        # half-extent of the bounding box (metres) — matc
 # is evaluated at the correct spatial location.
 #
 #
-# Then replace the placeholder below with the printed values:
-# grid_center: [-0.001388, 0.001177, 0.102020]
 # Optional hierarchical decode (test.py): coarse grid + surface cells + fine
 # samples inside dilated cells. When hierarchical_decode is true, grid_resolution
 # is not used; effective fine lattice is R_fine = (coarse_resolution-1)*fine_subdiv+1.
