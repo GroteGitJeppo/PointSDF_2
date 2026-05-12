@@ -437,7 +437,14 @@ def main(cfg: dict):
         lr=cfg.get('lr', 0.001),
         weight_decay=cfg.get('weight_decay', 1e-4),
     )
-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=cfg.get('lr_gamma', 0.97))
+    total_epochs = cfg.get('epochs', 100)
+    # lr_gamma is the per-epoch decay factor calibrated for 100 epochs.
+    # The actual per-epoch gamma is scaled so the total decay is the same
+    # regardless of how many epochs are configured: gamma_actual = lr_gamma^(100/epochs).
+    _gamma = float(cfg.get('lr_gamma', 0.97)) ** (100.0 / max(total_epochs, 1))
+    print(f'LR scheduler: ExponentialLR gamma={_gamma:.6f} '
+          f'(LR {cfg.get("lr", 0.001):.2e} → {cfg.get("lr", 0.001) * _gamma**total_epochs:.2e} over {total_epochs} epochs)')
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=_gamma)
 
     sigma = cfg.get('sigma_regulariser', 0.01)
     sdf_loss_weight = float(cfg.get('sdf_loss_weight', 0.0))
