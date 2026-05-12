@@ -13,7 +13,7 @@ splits_csv: data/3DPotatoTwin/splits.csv
 #   python -m data.ply_index --data_root data/3DPotatoTwin/1_rgbd/2_pcd \
 #                            --output    data/3DPotatoTwin/ply_index.csv
 # Then uncomment the line below:
-# ply_index_csv: data/3DPotatoTwin/ply_index.csv
+ply_index_csv: data/3DPotatoTwin/ply_index.csv
 target_csv:    data/3DPotatoTwin/mesh_traits.csv
 volume_column: "volume (cm3)"     # column in target_csv that holds ground-truth volume (cm³ = mL)
 metadata_csv:  data/3DPotatoTwin/ground_truth.csv   # optional: provides cultivar / growing_season columns

@@ -50,17 +50,33 @@ if not WITH_TORCH_CLUSTER:
 # Helpers (identical to test.py)
 # ---------------------------------------------------------------------------
 
-def process_ply(ply_path: str, num_points: int, pre_transform, device):
-    """Load, centre, FPS-sample a .ply file and return a batched PyG Data."""
+def process_ply(ply_path: str, num_points: int, pre_transform, device,
+                normalize_half_extent: float = 0.05):
+    """Load, centre, normalise, FPS-sample a .ply file and return a batched PyG Data.
+
+    Mirrors PointCloudLatentDataset.__getitem__: centre → isotropic normalise
+    (max abs coord = normalize_half_extent) → FPS.  The scale ratio is stored
+    as data.scale so the encoder can recover metric size information.
+    """
     pcd = o3d.io.read_point_cloud(ply_path)
     points = torch.tensor(np.asarray(pcd.points), dtype=torch.float)
     data = Data(pos=points)
-    data = pre_transform(data)
+    data = pre_transform(data)          # centres the cloud
     points = data.pos
+
+    # Isotropic normalisation — same as _normalize_points in encoder_dataset.py
+    max_half_extent = points.abs().max().item()
+    if max_half_extent > 1e-6:
+        scale = max_half_extent / normalize_half_extent
+        points = points / scale
+    else:
+        scale = 1.0
+
     if points.size(0) > num_points:
         points, _ = torch_fpsample.sample(points, num_points)
     data = Data(pos=points)
     data.batch = torch.zeros(points.size(0), dtype=torch.int64)
+    data.scale = torch.tensor([scale], dtype=torch.float)
     return data.to(device)
 
 
@@ -75,6 +91,7 @@ def evaluate_checkpoint(
     grid_coords: torch.Tensor,
     pre_transform,
     device,
+    normalize_half_extent: float = 0.05,
 ) -> tuple[float, float, float, int, int]:
     """
     Run the full pipeline on a list of PLY files and return volume metrics.
@@ -95,7 +112,7 @@ def evaluate_checkpoint(
 
         gt_volume = float(gt_df.loc[unique_id, volume_col])
 
-        data = process_ply(ply_file, num_points, pre_transform, device)
+        data = process_ply(ply_file, num_points, pre_transform, device, normalize_half_extent)
         latent = encoder(data)                              # (1, latent_size)
 
         latent_tiled = latent.expand(grid_coords.size(0), -1)
@@ -181,6 +198,7 @@ def main(cfg: dict, run_dir: str, split: str, also_best_mse: bool):
 
     pre_transform = T.Center()
     num_points = cfg.get('num_points', 1024)
+    normalize_half_extent = float(cfg.get('normalize_half_extent', 0.05))
 
     # ----- Discover snapshots -----
     snapshots_dir = Path(run_dir) / 'snapshots'
@@ -214,6 +232,7 @@ def main(cfg: dict, run_dir: str, split: str, also_best_mse: bool):
         rmse, mae, r2, n_valid, n_failed = evaluate_checkpoint(
             encoder, decoder, ply_files, gt_df, volume_col,
             num_points, grid_coords, pre_transform, device,
+            normalize_half_extent=normalize_half_extent,
         )
 
         results.append({
