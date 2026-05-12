@@ -51,7 +51,7 @@ snapshot_frequency: 10       # save a checkpoint every N epochs for post-hoc vol
 # Set augmentation_enabled: false to train without any augmentation (useful for
 # debugging or ablation studies). When false, the augmentation block below is
 # ignored entirely and point clouds are loaded as-is (centered + FPS only).
-augmentation_enabled: false
+augmentation_enabled: true
 # Aggressive but bounded: strong viewpoint + distance stress without unbounded noise.
 # If val loss diverges, reduce jitter_std / scale span / dropout_max first.
 augmentation:
@@ -112,7 +112,7 @@ lambda_attraction:  0.05      # weight applied to AttRepLoss (matches corepp sup
 delta_rep:          0.5       # margin for repulsion hinge loss
 
 # ---- Inference / test settings -----------------------------
-grid_resolution: 32          # resolution^3 SDF query points per sample (uniform mode only)
+grid_resolution: 24          # resolution^3 SDF query points per sample (uniform mode only)
 grid_bbox:       0.1        # half-extent of the bounding box (metres) — matches normalize_half_extent
 
 # grid_center: the mean centroid of the complete laser scans (in the scanner
