@@ -104,7 +104,7 @@ def evaluate_checkpoint(
     pred_volumes: list[float] = []
     n_failed = 0
 
-    for ply_file in ply_files:
+    for ply_file in tqdm(ply_files, desc='eval', leave=False, unit='scan'):
         unique_id = Path(ply_file).parent.name
 
         if unique_id not in gt_df.index:
@@ -222,7 +222,7 @@ def main(cfg: dict, run_dir: str, split: str, also_best_mse: bool):
     encoder = PointNetEncoder(latent_size=latent_size).to(device)
     results: list[dict] = []
 
-    for snap_dir in snapshot_dirs:
+    for snap_dir in tqdm(snapshot_dirs, desc='snapshots', unit='epoch'):
         epoch = int(snap_dir.name)
         ckpt_path = snap_dir / 'checkpoint.pth'
 
@@ -246,7 +246,7 @@ def main(cfg: dict, run_dir: str, split: str, also_best_mse: bool):
         })
 
         status = f'RMSE={rmse:.2f} mL  MAE={mae:.2f} mL  R²={r2:.3f}  valid={n_valid}/{n_valid+n_failed}'
-        print(f'Epoch {epoch:04d} | {status}')
+        tqdm.write(f'Epoch {epoch:04d} | {status}')
 
     # ----- Rank and report -----
     df = pd.DataFrame(results)
