@@ -37,7 +37,7 @@ output_dir: weights/encoder
 
 # ---- Encoder training --------------------------------------
 seed:              133
-epochs:            100
+epochs:            500
 batch_size:        16
 num_points:        1024
 normalize_half_extent: 0.05   # center + scale every point cloud to fit in [-0.05, 0.05]^3

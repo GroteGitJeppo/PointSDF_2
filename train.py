@@ -451,13 +451,28 @@ def main(cfg: dict):
     if use_contrastive:
         print(f'Contrastive loss (AttRepLoss) enabled — lambda={lambda_attraction}, delta_rep={delta_rep}')
 
+    # ----- Optional resume from snapshot checkpoint -----
+    resume_path = cfg.get('_resume_checkpoint', None)
+    start_epoch = 0
+    best_val_loss = float('inf')
+    if resume_path:
+        print(f'Resuming from checkpoint: {resume_path}')
+        ckpt = torch.load(resume_path, map_location=device)
+        encoder.load_state_dict(ckpt['encoder_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        start_epoch = int(ckpt.get('epoch', 0))
+        best_val_loss = float(ckpt.get('val_loss', float('inf')))
+        # Restore scheduler state: step() was called start_epoch times already
+        for _ in range(start_epoch):
+            scheduler.step()
+        print(f'  Resumed from epoch {start_epoch}, best_val_loss={best_val_loss:.5f}')
+
     # ----- Training loop -----
     snapshot_freq = int(cfg.get('snapshot_frequency', 10))
     snapshots_dir = os.path.join(output_dir, 'snapshots')
     os.makedirs(snapshots_dir, exist_ok=True)
 
-    best_val_loss = float('inf')
-    for epoch in range(1, cfg.get('epochs', 100) + 1):
+    for epoch in range(start_epoch + 1, cfg.get('epochs', 100) + 1):
         t0 = time.time()
         train_loss, train_mse, train_reg, train_sdf, train_att = train_epoch(
             encoder, decoder, optimizer, train_loader, sigma, sdf_loss_weight, device,
@@ -525,6 +540,15 @@ def main(cfg: dict):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Stage 2: encoder training')
     parser.add_argument('--config', '-c', required=True, help='Path to YAML config file')
+    parser.add_argument(
+        '--resume', dest='resume_checkpoint', default=None, metavar='CHECKPOINT_PATH',
+        help='Path to a snapshot checkpoint.pth to resume training from '
+             '(e.g. weights/encoder/<run>/snapshots/0090/checkpoint.pth)',
+    )
+    parser.add_argument(
+        '--epochs', dest='epochs', type=int, default=None,
+        help='Override the total number of epochs in the config',
+    )
 
     # Per-run overrides — set these in your SLURM script instead of editing the YAML.
     # Each flag overrides the corresponding key in the config when provided.
@@ -569,5 +593,9 @@ if __name__ == '__main__':
         cfg.setdefault('tuber_sampler', {})['enabled'] = (args.sampler == 'tuber')
     if args.contrastive_loss is not None:
         cfg['contrastive_loss'] = args.contrastive_loss
+    if args.resume_checkpoint is not None:
+        cfg['_resume_checkpoint'] = args.resume_checkpoint
+    if args.epochs is not None:
+        cfg['epochs'] = args.epochs
 
     main(cfg)
