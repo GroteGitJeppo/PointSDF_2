@@ -271,12 +271,12 @@ def main(cfg: dict, run_dir: str, split: str, also_best_mse: bool):
     print(f'\nBest checkpoint: epoch {best_epoch:04d}  RMSE={best_rmse:.3f} mL')
 
     # ----- Save CSV -----
-    csv_path = Path(run_dir) / 'val_volume_selection.csv'
+    csv_path = Path(run_dir) / f'val_volume_selection_{grid_resolution}.csv'
     df.to_csv(str(csv_path), index=False)
     print(f'Results saved to: {csv_path}')
 
     # ----- Copy best checkpoint -----
-    best_vol_dir = Path(run_dir) / 'best_vol'
+    best_vol_dir = Path(run_dir) / f'best_vol_{grid_resolution}'
     best_vol_dir.mkdir(exist_ok=True)
     dest = best_vol_dir / 'checkpoint.pth'
     shutil.copy2(best_ckpt, str(dest))
@@ -307,9 +307,15 @@ if __name__ == '__main__':
                         help='Dataset split to evaluate on (default: val)')
     parser.add_argument('--also_best_mse', action='store_true',
                         help='Also copy the MSE-best checkpoint for side-by-side comparison')
+    parser.add_argument(
+        '--grid_resolution', type=int, default=None,
+        help='Override grid_resolution from config (number of voxels per axis)',
+    )
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    if args.grid_resolution is not None:
+        cfg['grid_resolution'] = args.grid_resolution
     main(cfg, args.run_dir, args.split, args.also_best_mse)

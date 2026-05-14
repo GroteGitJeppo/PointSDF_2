@@ -221,12 +221,14 @@ def main(cfg: dict, checkpoint_path: str):
 
     if hierarchical_decode:
         R_fine = (coarse_resolution - 1) * fine_subdiv + 1
+        effective_resolution = R_fine
         print(
             f'Hierarchical SDF decode: R_coarse={coarse_resolution}, subdiv={fine_subdiv}, '
             f'dilation={surface_dilation} → embedded R_fine={R_fine} (grid_resolution={grid_resolution} unused)'
         )
         grid_coords = None
     else:
+        effective_resolution = grid_resolution
         grid_coords = get_volume_coords(resolution=grid_resolution, bbox=grid_bbox).to(device) + grid_center
 
     # GT point clouds for corepp-compatible Chamfer / P&R
@@ -481,7 +483,7 @@ def main(cfg: dict, checkpoint_path: str):
             )
 
     results_path = os.path.join(
-        os.path.dirname(checkpoint_path), 'test_results.csv'
+        os.path.dirname(checkpoint_path), f'test_results_{effective_resolution}.csv'
     )
     df_out.to_csv(results_path, index=False)
     print(f'\nResults saved to: {results_path}')
@@ -495,10 +497,16 @@ if __name__ == '__main__':
         '--year', default='all', choices=['2023', '2025', 'all'],
         help='Restrict evaluation to a single year cohort (2023 / 2025) or run on all test labels (default: all)',
     )
+    parser.add_argument(
+        '--grid_resolution', type=int, default=None,
+        help='Override grid_resolution from config (number of voxels per axis)',
+    )
     args = parser.parse_args()
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    if args.grid_resolution is not None:
+        cfg['grid_resolution'] = args.grid_resolution
     cfg['_year_filter'] = args.year
     main(cfg, args.checkpoint)
