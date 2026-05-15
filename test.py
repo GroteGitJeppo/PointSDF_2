@@ -266,6 +266,7 @@ def main(cfg: dict, checkpoint_path: str):
         'exec_time_ms',
     ]
     rows = []
+    latent_buffer: dict[str, torch.Tensor] = {}
     exec_times = []
     encoder_times: list[float] = []
     latent_save_times: list[float] = []
@@ -293,12 +294,10 @@ def main(cfg: dict, checkpoint_path: str):
             t1 = timeit.default_timer()
             encoder_ms = (t1 - t0) * 1e3
 
-            # Per-scan latent on disk — same placement as corepp/test.py (after encoder,
-            # before grid decode); included in exec_time_ms.
+            # Buffer latent in RAM — flushed to disk in one batch after the loop.
             t_ls0 = timeit.default_timer()
-            latent_save = latent.detach().cpu().squeeze()
             stem = Path(ply_file).stem
-            torch.save(latent_save, os.path.join(latent_test_dir, f'{stem}.pth'))
+            latent_buffer[stem] = latent.detach().cpu().squeeze()
             t_ls1 = timeit.default_timer()
             latent_save_ms = (t_ls1 - t_ls0) * 1e3
 
@@ -410,6 +409,10 @@ def main(cfg: dict, checkpoint_path: str):
                 'convex_hull_ms': round(convex_hull_ms, 2),
                 'exec_time_ms': round(elapsed_ms, 2),
             })
+
+    batch_latent_path = os.path.join(latent_test_dir, 'all_latents.pth')
+    torch.save(latent_buffer, batch_latent_path)
+    print(f'Encoder latents saved to {batch_latent_path}')
 
     df_out = pd.DataFrame(rows, columns=columns)
     valid = df_out.dropna(subset=['pred_volume_ml'])
