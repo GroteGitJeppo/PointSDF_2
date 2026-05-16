@@ -9,6 +9,7 @@ import torch
 import torch_fpsample
 from torch.utils.data import Dataset, Sampler
 from torch_geometric.data import Data
+from tqdm import tqdm
 
 from data.sdf_samples import resolve_samples_npz
 
@@ -19,11 +20,15 @@ def _remove_nans(t: torch.Tensor) -> torch.Tensor:
 
 class PointCloudLatentDataset(Dataset):
     """
-    On-the-fly dataset for Stage 2 (encoder training).
+    Dataset for Stage 2 (encoder training).
 
-    Loads partial point clouds (.ply) and their corresponding Stage 1 latent
-    codes (.pth) on demand.  Latent codes must be saved by train_deepsdf.py
-    as individual tensors: <latent_dir>/<label>.pth
+    At construction time, all partial point clouds are loaded from disk once,
+    centred, normalised, and FPS-sampled into RAM (mirrors corepp DeepSDF
+    ``SDFSamples(load_ram=True)``).  Latent codes and optional SDF samples are
+    also pre-loaded.  ``__getitem__`` only clones the cached cloud and applies
+    augmentation.
+
+    Latent codes must be saved as individual tensors: <latent_dir>/<label>.pth
 
     Optionally loads SDF samples from samples.npz for each label so that the
     training loop can also compute an end-to-end SDF loss through the frozen
@@ -56,6 +61,7 @@ class PointCloudLatentDataset(Dataset):
         normalize_half_extent: float = 0.05,
     ):
         self.latent_dir = latent_dir
+        self.split = split
         self.num_points = num_points
         self.apply_augmentation = apply_augmentation
         self._sdf_samples_per_shape = sdf_samples_per_shape
@@ -127,6 +133,8 @@ class PointCloudLatentDataset(Dataset):
             {lbl: lp for _, lbl, lp in self.samples}
         )
 
+        self._pc_cache: list[tuple[torch.Tensor, float]] = self._preload_point_clouds()
+
         print(f"PointCloudLatentDataset [{split}]: {len(self.samples)} samples")
 
     # ------------------------------------------------------------------
@@ -143,6 +151,26 @@ class PointCloudLatentDataset(Dataset):
         for label, path in label_to_path.items():
             latents[label] = torch.load(path, weights_only=True, map_location='cpu').detach().reshape(-1)
         return latents
+
+    def _load_processed_point_cloud(self, ply_path: str) -> tuple[torch.Tensor, float]:
+        """Load a PLY, centre, normalise, and FPS to num_points."""
+        pcd = o3d.io.read_point_cloud(ply_path)
+        points = torch.tensor(np.asarray(pcd.points), dtype=torch.float32)
+        points = self._center_points(points)
+        points, scale = self._normalize_points(points)
+        points = self._enforce_num_points(points)
+        return points, scale
+
+    def _preload_point_clouds(self) -> list[tuple[torch.Tensor, float]]:
+        """Load every scan into RAM once (centred, normalised, FPS-sampled)."""
+        cache: list[tuple[torch.Tensor, float]] = []
+        for ply_path, _, _ in tqdm(
+            self.samples,
+            desc=f"Preloading point clouds [{self.split}]",
+            unit="scan",
+        ):
+            cache.append(self._load_processed_point_cloud(ply_path))
+        return cache
 
     def _parse_augmentation_cfg(self, cfg: dict | None) -> dict:
         # Backward-compatible defaults approximate previous behaviour.
@@ -331,13 +359,10 @@ class PointCloudLatentDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Data:
-        ply_path, label, latent_path = self.samples[idx]
+        _, label, _ = self.samples[idx]
 
-        pcd = o3d.io.read_point_cloud(ply_path)
-        points = torch.tensor(np.asarray(pcd.points), dtype=torch.float)
-        points = self._center_points(points)
-        points, scale = self._normalize_points(points)
-        points = self._enforce_num_points(points)
+        points, scale = self._pc_cache[idx]
+        points = points.clone()
         if self.apply_augmentation:
             points = self._augment_points(points)
         data = Data(pos=points)
