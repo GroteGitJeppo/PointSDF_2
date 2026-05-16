@@ -32,6 +32,20 @@ decoder_weights: weights/deepsdf/potato_32/ModelParameters/130.pth
 # Path to the Stage 1 config (used to read architecture params)
 decoder_config:  configs/train_deepsdf.yaml
 
+# ---- Encoder architecture (test.py) -------------------------
+# type: pointnet (default) | corepp_rgbd
+encoder:
+  type: corepp_rgbd
+  # CoRe++ RGB-D CNN (EncoderBigPooled by default; matches super3d_32.json)
+  variant: pool
+  input_size: 304
+  detection_input: mask
+  normalize_depth: true
+  depth_min: 230
+  depth_max: 350
+  rgbd_data_dir: data/3DPotatoTwin/corepp_rgbd
+  corepp_weights: weights/encoder/corepp/_super3d_32_best_model.pt
+
 # ---- Output ------------------------------------------------
 output_dir: weights/encoder
 

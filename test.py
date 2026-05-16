@@ -44,8 +44,12 @@ from torch_geometric.data import Data
 from torch_geometric.typing import WITH_TORCH_CLUSTER
 from tqdm import tqdm
 
+from torch.utils.data import DataLoader
+
 from data.ply_index import load_ply_files
+from data.rgbd_corepp_dataset import RgbdCoreppDataset
 from models import PointNetEncoder, SDFDecoder
+from models.corepp_encoder import build_corepp_encoder, load_corepp_encoder_state
 from utils import decode_sdf_hierarchical, get_volume_coords, sdf2mesh
 from metrics_3d.chamfer_distance import ChamferDistance
 from metrics_3d.precision_recall import PrecisionRecall
@@ -132,6 +136,118 @@ def _chamfer_and_pr_one_pass(gt_pcd, mesh, cd_metric: ChamferDistance, pr_metric
     return chamfer_m, p, r, f1
 
 
+def _encoder_settings(cfg: dict) -> dict:
+    enc = cfg.get("encoder") or {}
+    if not isinstance(enc, dict):
+        return {"type": "pointnet"}
+    out = dict(enc)
+    out.setdefault("type", "pointnet")
+    return out
+
+
+def _append_result_row(
+    rows,
+    *,
+    file_name: str,
+    unique_id: str,
+    gt_df: pd.DataFrame,
+    gt_volume: float,
+    pred_volume: float,
+    chamfer_mm: float,
+    prec: float,
+    rec: float,
+    f1: float,
+    encoder_ms: float,
+    latent_save_ms: float,
+    decoder_ms: float,
+    convex_hull_ms: float,
+    elapsed_ms: float,
+) -> None:
+    cultivar = gt_df.loc[unique_id, "cultivar"] if "cultivar" in gt_df.columns else ""
+    season = (
+        gt_df.loc[unique_id, "growing_season"]
+        if "growing_season" in gt_df.columns
+        else ""
+    )
+    year_val = np.nan
+    if "year" in gt_df.columns:
+        yv = gt_df.loc[unique_id, "year"]
+        if pd.notna(yv):
+            try:
+                year_val = int(float(yv))
+            except (TypeError, ValueError):
+                year_val = yv
+    rows.append(
+        {
+            "file_name": file_name,
+            "unique_id": unique_id,
+            "cultivar": cultivar,
+            "growing_season": season,
+            "year": year_val,
+            "gt_volume_ml": gt_volume,
+            "pred_volume_ml": pred_volume,
+            "chamfer_mm": chamfer_mm,
+            "precision": prec,
+            "recall": rec,
+            "f1": f1,
+            "encoder_ms": round(encoder_ms, 2),
+            "latent_save_ms": round(latent_save_ms, 2),
+            "decoder_ms": round(decoder_ms, 2),
+            "convex_hull_ms": round(convex_hull_ms, 2),
+            "exec_time_ms": round(elapsed_ms, 2),
+        }
+    )
+
+
+def _decode_volume(
+    *,
+    latent: torch.Tensor,
+    decoder,
+    device: torch.device,
+    grid_coords: torch.Tensor | None,
+    grid_center: torch.Tensor,
+    hierarchical_decode: bool,
+    grid_bbox: float,
+    coarse_resolution: int,
+    fine_subdiv: int,
+    surface_dilation: int,
+    max_fine_queries: int | None,
+    decode_chunk: int,
+    unique_id: str,
+) -> tuple[torch.Tensor | None, object | None, float]:
+    """Run SDF decode + convex hull; return (grid_coords, mesh, pred_volume_ml)."""
+    if hierarchical_decode:
+        grid_coords, pred_sdf = decode_sdf_hierarchical(
+            latent=latent,
+            decoder=decoder,
+            bbox=grid_bbox,
+            R_coarse=coarse_resolution,
+            subdiv=fine_subdiv,
+            surface_dilation=surface_dilation,
+            device=device,
+            clamp_dist=None,
+            max_fine_queries=max_fine_queries,
+            decode_chunk=decode_chunk,
+            warn_fn=lambda msg: print(f"  {unique_id}: {msg}"),
+        )
+    else:
+        latent_tiled = latent.expand(grid_coords.size(0), -1)
+        decoder_input = torch.cat([latent_tiled, grid_coords], dim=1)
+        pred_sdf = decoder(decoder_input)
+
+    pred_volume = float("nan")
+    mesh = None
+    try:
+        mesh = sdf2mesh(pred_sdf, grid_coords)
+        if mesh.is_watertight():
+            pred_volume = round(mesh.get_volume() * 1e6, 2)
+        if float(grid_center.norm()) > 1e-6:
+            mesh.translate(-grid_center.cpu().numpy())
+    except (ValueError, RuntimeError) as e:
+        print(f"  Mesh extraction failed for {unique_id}: {e}")
+    return grid_coords, mesh, pred_volume
+
+
 def main(cfg: dict, checkpoint_path: str):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
@@ -140,9 +256,10 @@ def main(cfg: dict, checkpoint_path: str):
     with open(cfg['decoder_config']) as f:
         decoder_cfg = yaml.safe_load(f)
     latent_size = decoder_cfg['latent_size']
+    enc_cfg = _encoder_settings(cfg)
+    encoder_type = enc_cfg.get('type', 'pointnet').lower()
+    print(f'Encoder type: {encoder_type}')
 
-    # ----- Load models -----
-    encoder = PointNetEncoder(latent_size=latent_size).to(device)
     decoder = SDFDecoder(
         latent_size=latent_size,
         num_layers=decoder_cfg['num_layers'],
@@ -150,12 +267,30 @@ def main(cfg: dict, checkpoint_path: str):
         skip_connections=decoder_cfg['skip_connections'],
     ).to(device)
 
-    ckpt = torch.load(checkpoint_path, map_location=device)
-    encoder.load_state_dict(ckpt['encoder_state_dict'])
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     decoder.load_state_dict(ckpt['decoder_state_dict'])
-    encoder.eval()
     decoder.eval()
-    print(f'Loaded checkpoint from {checkpoint_path}')
+
+    if encoder_type == 'corepp_rgbd':
+        corepp_weights = enc_cfg.get('corepp_weights')
+        if not corepp_weights:
+            raise ValueError(
+                "encoder.type is 'corepp_rgbd' but encoder.corepp_weights is not set in config"
+            )
+        encoder = build_corepp_encoder(
+            variant=enc_cfg.get('variant', 'pool'),
+            latent_size=latent_size,
+            input_size=int(enc_cfg.get('input_size', 304)),
+        ).to(device)
+        load_corepp_encoder_state(encoder, corepp_weights, device=str(device))
+        print(f'Loaded CoRe++ encoder from {corepp_weights}')
+    else:
+        encoder = PointNetEncoder(latent_size=latent_size).to(device)
+        encoder.load_state_dict(ckpt['encoder_state_dict'])
+        print(f'Loaded PointNet encoder from {checkpoint_path}')
+
+    encoder.eval()
+    print(f'Loaded decoder from {checkpoint_path}')
 
     # ----- Dataset paths -----
     splits_df = pd.read_csv(cfg['splits_csv'], delimiter=',')
@@ -191,8 +326,6 @@ def main(cfg: dict, checkpoint_path: str):
         print(f'Year filter: {target_year} — kept {len(test_ids)}/{before} test labels')
     else:
         print(f'Year filter: all — {len(test_ids)} test labels')
-
-    ply_files = load_ply_files(cfg['data_root'], test_ids, cfg.get('ply_index_csv'))
 
     pre_transform = T.Center()
     num_points = cfg.get('num_points', 1024)
@@ -277,138 +410,160 @@ def main(cfg: dict, checkpoint_path: str):
     rec_values = []
     f1_values = []
 
-    with torch.no_grad():
-        for ply_file in tqdm(ply_files, desc='Testing'):
-            unique_id = os.path.basename(os.path.dirname(ply_file))
+    def _run_sample(
+        *,
+        file_name: str,
+        unique_id: str,
+        stem: str,
+        latent: torch.Tensor,
+        encoder_ms: float,
+        latent_save_ms: float,
+    ) -> None:
+        nonlocal grid_coords
+        t_dec0 = timeit.default_timer()
+        grid_coords, mesh, pred_volume = _decode_volume(
+            latent=latent,
+            decoder=decoder,
+            device=device,
+            grid_coords=grid_coords,
+            grid_center=grid_center,
+            hierarchical_decode=hierarchical_decode,
+            grid_bbox=grid_bbox,
+            coarse_resolution=coarse_resolution,
+            fine_subdiv=fine_subdiv,
+            surface_dilation=surface_dilation,
+            max_fine_queries=max_fine_queries,
+            decode_chunk=decode_chunk,
+            unique_id=unique_id,
+        )
+        _sync_cuda(device)
+        t_hull1 = timeit.default_timer()
+        decoder_ms = (t_hull1 - t_dec0) * 1e3
+        convex_hull_ms = 0.0
 
-            if unique_id not in gt_df.index:
-                continue
-
-            gt_volume = float(gt_df.loc[unique_id, volume_col])
-
-            data = process_ply(ply_file, num_points, pre_transform, device, normalize_half_extent)
-
-            t0 = timeit.default_timer()
-            latent = encoder(data)                          # (1, latent_size)
-            _sync_cuda(device)
-            t1 = timeit.default_timer()
-            encoder_ms = (t1 - t0) * 1e3
-
-            # Buffer latent in RAM — flushed to disk in one batch after the loop.
-            t_ls0 = timeit.default_timer()
-            stem = Path(ply_file).stem
-            latent_buffer[stem] = latent.detach().cpu().squeeze()
-            t_ls1 = timeit.default_timer()
-            latent_save_ms = (t_ls1 - t_ls0) * 1e3
-
-            t_dec0 = timeit.default_timer()
-            if hierarchical_decode:
-                grid_coords, pred_sdf = decode_sdf_hierarchical(
-                    latent=latent,
-                    decoder=decoder,
-                    bbox=grid_bbox,
-                    R_coarse=coarse_resolution,
-                    subdiv=fine_subdiv,
-                    surface_dilation=surface_dilation,
-                    device=device,
-                    clamp_dist=None,
-                    max_fine_queries=max_fine_queries,
-                    decode_chunk=decode_chunk,
-                    warn_fn=lambda msg: print(f'  {unique_id}: {msg}'),
-                )
-            else:
-                latent_tiled = latent.expand(grid_coords.size(0), -1)
-                decoder_input = torch.cat([latent_tiled, grid_coords], dim=1)
-                pred_sdf = decoder(decoder_input)
-            _sync_cuda(device)
-            t_dec1 = timeit.default_timer()
-            decoder_ms = (t_dec1 - t_dec0) * 1e3
-
-            pred_volume = float('nan')
-            chamfer_mm = float('nan')
-            prec = float('nan')
-            rec = float('nan')
-            f1 = float('nan')
-            mesh = None
-
-            t_hull0 = timeit.default_timer()
+        chamfer_mm = float('nan')
+        prec = float('nan')
+        rec = float('nan')
+        f1 = float('nan')
+        if compute_shape_metrics and mesh is not None:
             try:
-                mesh = sdf2mesh(pred_sdf, grid_coords)
-                if mesh.is_watertight():
-                    pred_volume = round(mesh.get_volume() * 1e6, 2)  # m³ → mL
-                # Translate mesh back to the origin so that Chamfer comparison
-                # with the centred GT PLY (from _load_gt_pcd) is in the same
-                # frame.  Volume is translation-invariant so it is unaffected.
-                if float(grid_center.norm()) > 1e-6:
-                    mesh.translate(-grid_center.cpu().numpy())
-            except (ValueError, RuntimeError) as e:
-                print(f'  Mesh extraction failed for {unique_id}: {e}')
-            _sync_cuda(device)
-            t_hull1 = timeit.default_timer()
-            convex_hull_ms = (t_hull1 - t_hull0) * 1e3
+                if unique_id not in gt_pcd_cache:
+                    gt_pcd_cache[unique_id] = _load_gt_pcd(
+                        gt_pcd_dir, unique_id, gt_ply_pattern
+                    )
+                gt_pcd = gt_pcd_cache[unique_id]
+                if gt_pcd is not None:
+                    chamfer_m, prec, rec, f1 = _chamfer_and_pr_one_pass(
+                        gt_pcd, mesh, cd_metric, pr_metric
+                    )
+                    chamfer_mm = round(chamfer_m * 1000, 6)
+                    chamfer_values.append(chamfer_m)
+                    prec = round(prec, 1)
+                    rec = round(rec, 1)
+                    f1 = round(f1, 1)
+                    prec_values.append(prec)
+                    rec_values.append(rec)
+                    f1_values.append(f1)
+                else:
+                    print(f'  GT PLY not found for {unique_id}')
+            except Exception as e:
+                print(f'  Shape metrics failed for {unique_id}: {e}')
 
-            elapsed_ms = (t_hull1 - t0) * 1e3
+        elapsed_ms = encoder_ms + latent_save_ms + decoder_ms + convex_hull_ms
+        exec_times.append(elapsed_ms)
+        encoder_times.append(encoder_ms)
+        latent_save_times.append(latent_save_ms)
+        decoder_times.append(decoder_ms)
+        hull_times.append(convex_hull_ms)
 
-            # corepp-compatible shape metrics: GT = centred complete scan PLY
-            if compute_shape_metrics and mesh is not None:
-                try:
-                    if unique_id not in gt_pcd_cache:
-                        gt_pcd_cache[unique_id] = _load_gt_pcd(
-                            gt_pcd_dir, unique_id, gt_ply_pattern
-                        )
-                    gt_pcd = gt_pcd_cache[unique_id]
-                    if gt_pcd is not None:
-                        chamfer_m, prec, rec, f1 = _chamfer_and_pr_one_pass(
-                            gt_pcd, mesh, cd_metric, pr_metric
-                        )
-                        chamfer_mm = round(chamfer_m * 1000, 6)
-                        chamfer_values.append(chamfer_m)
-                        prec = round(prec, 1)
-                        rec = round(rec, 1)
-                        f1 = round(f1, 1)
-                        prec_values.append(prec)
-                        rec_values.append(rec)
-                        f1_values.append(f1)
-                    else:
-                        print(f'  GT PLY not found for {unique_id}')
-                except Exception as e:
-                    print(f'  Shape metrics failed for {unique_id}: {e}')
+        gt_volume = float(gt_df.loc[unique_id, volume_col])
+        _append_result_row(
+            rows,
+            file_name=file_name,
+            unique_id=unique_id,
+            gt_df=gt_df,
+            gt_volume=gt_volume,
+            pred_volume=pred_volume,
+            chamfer_mm=chamfer_mm,
+            prec=prec,
+            rec=rec,
+            f1=f1,
+            encoder_ms=encoder_ms,
+            latent_save_ms=latent_save_ms,
+            decoder_ms=decoder_ms,
+            convex_hull_ms=convex_hull_ms,
+            elapsed_ms=elapsed_ms,
+        )
 
-            exec_times.append(elapsed_ms)
-            encoder_times.append(encoder_ms)
-            latent_save_times.append(latent_save_ms)
-            decoder_times.append(decoder_ms)
-            hull_times.append(convex_hull_ms)
-
-            cultivar = gt_df.loc[unique_id, 'cultivar'] if 'cultivar' in gt_df.columns else ''
-            season = gt_df.loc[unique_id, 'growing_season'] if 'growing_season' in gt_df.columns else ''
-            year_val = np.nan
-            if 'year' in gt_df.columns:
-                yv = gt_df.loc[unique_id, 'year']
-                if pd.notna(yv):
-                    try:
-                        year_val = int(float(yv))
-                    except (TypeError, ValueError):
-                        year_val = yv
-
-            rows.append({
-                'file_name': ply_file,
-                'unique_id': unique_id,
-                'cultivar': cultivar,
-                'growing_season': season,
-                'year': year_val,
-                'gt_volume_ml': gt_volume,
-                'pred_volume_ml': pred_volume,
-                'chamfer_mm': chamfer_mm,
-                'precision': prec,
-                'recall': rec,
-                'f1': f1,
-                'encoder_ms': round(encoder_ms, 2),
-                'latent_save_ms': round(latent_save_ms, 2),
-                'decoder_ms': round(decoder_ms, 2),
-                'convex_hull_ms': round(convex_hull_ms, 2),
-                'exec_time_ms': round(elapsed_ms, 2),
-            })
+    with torch.no_grad():
+        if encoder_type == 'corepp_rgbd':
+            rgbd_root = enc_cfg.get('rgbd_data_dir')
+            if not rgbd_root:
+                raise ValueError("encoder.rgbd_data_dir is required for corepp_rgbd")
+            rgbd_ds = RgbdCoreppDataset(
+                data_root=rgbd_root,
+                split='test',
+                input_size=int(enc_cfg.get('input_size', 304)),
+                detection_input=enc_cfg.get('detection_input', 'mask'),
+                normalize_depth=bool(enc_cfg.get('normalize_depth', True)),
+                depth_min=float(enc_cfg.get('depth_min', 230)),
+                depth_max=float(enc_cfg.get('depth_max', 350)),
+                label_filter=test_ids,
+            )
+            loader = DataLoader(rgbd_ds, batch_size=1, shuffle=False)
+            for batch in tqdm(loader, desc='Testing (CoRe++ RGB-D)'):
+                unique_id = batch['label'][0]
+                if unique_id not in gt_df.index:
+                    continue
+                file_name = batch['file_name'][0]
+                frame_id = batch['frame_id'][0]
+                rgb = batch['rgb'].to(device)
+                depth = batch['depth'].to(device)
+                t0 = timeit.default_timer()
+                encoder_input = torch.cat((rgb, depth), dim=1)
+                latent = encoder(encoder_input)
+                _sync_cuda(device)
+                t1 = timeit.default_timer()
+                encoder_ms = (t1 - t0) * 1e3
+                t_ls0 = timeit.default_timer()
+                latent_buffer[frame_id] = latent.detach().cpu().squeeze()
+                t_ls1 = timeit.default_timer()
+                latent_save_ms = (t_ls1 - t_ls0) * 1e3
+                _run_sample(
+                    file_name=file_name,
+                    unique_id=unique_id,
+                    stem=frame_id,
+                    latent=latent,
+                    encoder_ms=encoder_ms,
+                    latent_save_ms=latent_save_ms,
+                )
+        else:
+            ply_files = load_ply_files(cfg['data_root'], test_ids, cfg.get('ply_index_csv'))
+            for ply_file in tqdm(ply_files, desc='Testing'):
+                unique_id = os.path.basename(os.path.dirname(ply_file))
+                if unique_id not in gt_df.index:
+                    continue
+                data = process_ply(
+                    ply_file, num_points, pre_transform, device, normalize_half_extent
+                )
+                t0 = timeit.default_timer()
+                latent = encoder(data)
+                _sync_cuda(device)
+                t1 = timeit.default_timer()
+                encoder_ms = (t1 - t0) * 1e3
+                t_ls0 = timeit.default_timer()
+                stem = Path(ply_file).stem
+                latent_buffer[stem] = latent.detach().cpu().squeeze()
+                t_ls1 = timeit.default_timer()
+                latent_save_ms = (t_ls1 - t_ls0) * 1e3
+                _run_sample(
+                    file_name=ply_file,
+                    unique_id=unique_id,
+                    stem=stem,
+                    latent=latent,
+                    encoder_ms=encoder_ms,
+                    latent_save_ms=latent_save_ms,
+                )
 
     batch_latent_path = os.path.join(latent_test_dir, 'all_latents.pth')
     torch.save(latent_buffer, batch_latent_path)
