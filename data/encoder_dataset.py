@@ -152,6 +152,8 @@ class PointCloudLatentDataset(Dataset):
             "rotate_x_deg": 2.0,
             "rotate_y_deg": 2.0,
             "rotate_z_deg": 90.0,
+            "max_shear": 0.0,
+            "shear_prob": 1.0,
             "flip_x_prob": 0.5,
             "scale_min": 1.0,
             "scale_max": 1.0,
@@ -207,6 +209,23 @@ class PointCloudLatentDataset(Dataset):
         rot_z = torch.tensor([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
         return rot_z @ rot_y @ rot_x
 
+    @staticmethod
+    def _apply_shear_x(points: torch.Tensor, max_shear: float) -> torch.Tensor:
+        """X-direction shear matching corepp/data_preparation/augment.py.
+
+        x' = x + s0 * y + s1 * z,  with s0, s1 ~ Uniform(-max_shear, max_shear).
+        """
+        if max_shear <= 0.0:
+            return points
+        shear = np.random.uniform(-max_shear, max_shear, size=(2,))
+        s0, s1 = float(shear[0]), float(shear[1])
+        shear_mat = torch.tensor(
+            [[1.0, s0, s1], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            dtype=points.dtype,
+            device=points.device,
+        )
+        return points @ shear_mat.T
+
     def _dropout_points(self, points: torch.Tensor, drop_ratio: float) -> torch.Tensor:
         n = points.size(0)
         if n < 2 or drop_ratio <= 0.0:
@@ -251,6 +270,10 @@ class PointCloudLatentDataset(Dataset):
         rz = math.radians(np.random.uniform(-cfg["rotate_z_deg"], cfg["rotate_z_deg"]))
         rot = self._rotation_matrix_xyz(rx, ry, rz).to(points.dtype)
         points = points @ rot.T
+
+        # X-direction shear (CoRe++ augment.py: T[0,1], T[0,2]).
+        if np.random.rand() < float(cfg["shear_prob"]):
+            points = self._apply_shear_x(points, float(cfg["max_shear"]))
 
         # Left-right flip around x (physically plausible for conveyor setup).
         if np.random.rand() < float(cfg["flip_x_prob"]):
