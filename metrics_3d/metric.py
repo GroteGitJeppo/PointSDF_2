@@ -44,7 +44,7 @@ class Metrics3D():
         if isinstance(geom, o3d.geometry.Geometry):
             geom_type = geom.get_geometry_type().value
             if geom_type == MESHTYPE or geom_type == TETRATYPE:
-                geom_pcd = geom.sample_points_uniformly(1000000)
+                geom_pcd = geom.sample_points_uniformly(200000)
             elif geom_type == PCDTYPE:
                 geom_pcd = geom
             else:
