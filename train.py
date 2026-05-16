@@ -14,6 +14,7 @@ Saves:
 
 Usage:
     python train.py --config configs/train_encoder.yaml
+    python train.py --config configs/train_encoder.yaml --run_tag $SLURM_JOB_ID
 """
 
 import argparse
@@ -303,9 +304,10 @@ def main(cfg: dict):
     random.seed(cfg.get('seed', 133))
     np.random.seed(cfg.get('seed', 133))
 
-    run_tag = datetime.now().strftime('%d_%m_%H%M%S')
+    run_tag = cfg.get('_run_tag') or datetime.now().strftime('%d_%m_%H%M%S')
     output_dir = os.path.join(cfg['output_dir'], run_tag)
     os.makedirs(output_dir, exist_ok=True)
+    print(f'Run directory: {output_dir}')
 
     with open(os.path.join(output_dir, 'config.yaml'), 'w') as f:
         yaml.dump(cfg, f)
@@ -556,6 +558,13 @@ if __name__ == '__main__':
         '--epochs', dest='epochs', type=int, default=None,
         help='Override the total number of epochs in the config',
     )
+    parser.add_argument(
+        '--run_tag', default=None,
+        help=(
+            'Subdirectory name under output_dir for this run '
+            '(e.g. SLURM job id). Default: timestamp DD_MM_HHMMSS.'
+        ),
+    )
 
     # Per-run overrides — set these in your SLURM script instead of editing the YAML.
     # Each flag overrides the corresponding key in the config when provided.
@@ -604,5 +613,14 @@ if __name__ == '__main__':
         cfg['_resume_checkpoint'] = args.resume_checkpoint
     if args.epochs is not None:
         cfg['epochs'] = args.epochs
+    if args.run_tag is not None:
+        tag = str(args.run_tag).strip()
+        if not tag:
+            parser.error('--run_tag must not be empty')
+        if os.path.sep in tag or (os.path.altsep and os.path.altsep in tag):
+            parser.error('--run_tag must not contain path separators')
+        if tag in ('.', '..'):
+            parser.error('--run_tag must not be . or ..')
+        cfg['_run_tag'] = tag
 
     main(cfg)
