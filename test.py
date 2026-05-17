@@ -22,7 +22,11 @@ Timing (corepp-comparable):
     corepp's skip of the first iteration.
 
 Usage:
-    python test.py --config configs/train_encoder.yaml --checkpoint weights/encoder/<run>/checkpoint.pth
+    # PointNet encoder (Stage 2 checkpoint required)
+    python test.py -c configs/train_encoder.yaml --checkpoint weights/encoder/<run>/checkpoint.pth
+
+    # CoRe++ RGB-D encoder (decoder from decoder_weights in config; --checkpoint optional)
+    python test.py -c configs/train_encoder.yaml
 """
 
 import argparse
@@ -134,6 +138,21 @@ def _chamfer_and_pr_one_pass(gt_pcd, mesh, cd_metric: ChamferDistance, pr_metric
     else:
         f1 = 2 * p * r / (p + r)
     return chamfer_m, p, r, f1
+
+
+def _load_decoder_weights(decoder, weights_path: str, device: torch.device) -> None:
+    """Load Stage 1 (model_state_dict) or Stage 2 (decoder_state_dict) decoder weights."""
+    ckpt = torch.load(weights_path, map_location=device, weights_only=False)
+    if isinstance(ckpt, dict) and "decoder_state_dict" in ckpt:
+        state = ckpt["decoder_state_dict"]
+    elif isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        state = ckpt["model_state_dict"]
+    elif isinstance(ckpt, dict):
+        state = ckpt
+    else:
+        raise ValueError(f"Unexpected decoder checkpoint format: {weights_path}")
+    state = {k.removeprefix("module."): v for k, v in state.items()}
+    decoder.load_state_dict(state)
 
 
 def _encoder_settings(cfg: dict) -> dict:
@@ -259,7 +278,7 @@ def _decode_volume(
     return grid_coords, mesh, pred_volume, decoder_ms, convex_hull_ms
 
 
-def main(cfg: dict, checkpoint_path: str):
+def main(cfg: dict, checkpoint_path: str | None = None):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
 
@@ -278,11 +297,16 @@ def main(cfg: dict, checkpoint_path: str):
         skip_connections=decoder_cfg['skip_connections'],
     ).to(device)
 
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    decoder.load_state_dict(ckpt['decoder_state_dict'])
-    decoder.eval()
-
     if encoder_type == 'corepp_rgbd':
+        decoder_weights = cfg.get('decoder_weights')
+        if not decoder_weights:
+            raise ValueError(
+                "encoder.type is 'corepp_rgbd' requires 'decoder_weights' in config"
+            )
+        _load_decoder_weights(decoder, decoder_weights, device)
+        decoder.eval()
+        print(f'Loaded decoder from {decoder_weights}')
+
         corepp_weights = enc_cfg.get('corepp_weights')
         if not corepp_weights:
             raise ValueError(
@@ -295,13 +319,30 @@ def main(cfg: dict, checkpoint_path: str):
         ).to(device)
         load_corepp_encoder_state(encoder, corepp_weights, device=str(device))
         print(f'Loaded CoRe++ encoder from {corepp_weights}')
+
+        results_dir = cfg.get('output_dir', os.path.dirname(decoder_weights))
     else:
+        if not checkpoint_path:
+            raise ValueError(
+                "--checkpoint is required when encoder.type is 'pointnet' (default)"
+            )
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        if 'decoder_state_dict' not in ckpt:
+            raise KeyError(
+                f"{checkpoint_path} has no 'decoder_state_dict'; "
+                "use a Stage 2 checkpoint.pth"
+            )
+        decoder.load_state_dict(ckpt['decoder_state_dict'])
+        decoder.eval()
+        print(f'Loaded decoder from {checkpoint_path}')
+
         encoder = PointNetEncoder(latent_size=latent_size).to(device)
         encoder.load_state_dict(ckpt['encoder_state_dict'])
         print(f'Loaded PointNet encoder from {checkpoint_path}')
 
+        results_dir = os.path.dirname(checkpoint_path)
+
     encoder.eval()
-    print(f'Loaded decoder from {checkpoint_path}')
 
     # ----- Dataset paths -----
     splits_df = pd.read_csv(cfg['splits_csv'], delimiter=',')
@@ -646,8 +687,9 @@ def main(cfg: dict, checkpoint_path: str):
                 f'{_shape_str(sel)}'
             )
 
+    os.makedirs(results_dir, exist_ok=True)
     results_path = os.path.join(
-        os.path.dirname(checkpoint_path), f'test_results_{effective_resolution}.csv'
+        results_dir, f'test_results_{effective_resolution}.csv'
     )
     df_out.to_csv(results_path, index=False)
     print(f'\nResults saved to: {results_path}')
@@ -656,7 +698,11 @@ def main(cfg: dict, checkpoint_path: str):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Stage 2: encoder evaluation')
     parser.add_argument('--config', '-c', required=True, help='Path to YAML encoder config')
-    parser.add_argument('--checkpoint', required=True, help='Path to checkpoint.pth')
+    parser.add_argument(
+        '--checkpoint',
+        default=None,
+        help='Stage 2 checkpoint.pth (required for pointnet; optional for corepp_rgbd)',
+    )
     parser.add_argument(
         '--year', default='all', choices=['2023', '2025', 'all'],
         help='Restrict evaluation to a single year cohort (2023 / 2025) or run on all test labels (default: all)',
