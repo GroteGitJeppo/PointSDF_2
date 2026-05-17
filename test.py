@@ -23,6 +23,10 @@ Timing (corepp-comparable):
 
 Usage:
     python test.py --config configs/train_encoder.yaml --checkpoint weights/encoder/<run>/checkpoint.pth
+
+Results CSV:
+    <results_dir>/test_results_<encoder_run>_<grid_resolution>.csv
+    (default results_dir: results)
 """
 
 import argparse
@@ -60,6 +64,29 @@ def _sync_cuda(device: torch.device) -> None:
     """Wait for GPU work to finish so timers bracketing GPU sections are accurate."""
     if device.type == 'cuda':
         torch.cuda.synchronize()
+
+
+def _encoder_run_name(checkpoint_path: str) -> str:
+    """Encoder training run folder name (parent of checkpoint.pth, or above snapshots/)."""
+    ckpt = Path(checkpoint_path).resolve()
+    parent = ckpt.parent
+    if parent.name == 'snapshots':
+        return parent.parent.name
+    return parent.name
+
+
+def _test_results_path(
+    checkpoint_path: str,
+    results_dir: str,
+    effective_resolution: int,
+    year_filter: str = 'all',
+) -> str:
+    """Build results-style CSV path: test_results_<run>_<R>[_{year}].csv"""
+    run_name = _encoder_run_name(checkpoint_path)
+    filename = f'test_results_{run_name}_{effective_resolution}'
+    if year_filter != 'all':
+        filename += f'_{year_filter}'
+    return str(Path(results_dir) / f'{filename}.csv')
 
 
 def process_ply(ply_path: str, num_points: int, pre_transform, device,
@@ -498,8 +525,13 @@ def main(cfg: dict, checkpoint_path: str):
                 f'{_shape_str(sel)}'
             )
 
-    results_path = os.path.join(
-        os.path.dirname(checkpoint_path), f'test_results_{effective_resolution}.csv'
+    results_dir = cfg.get('results_dir', 'results')
+    os.makedirs(results_dir, exist_ok=True)
+    results_path = _test_results_path(
+        checkpoint_path,
+        results_dir,
+        effective_resolution,
+        year_filter=cfg.get('_year_filter', 'all'),
     )
     df_out.to_csv(results_path, index=False)
     print(f'\nResults saved to: {results_path}')

@@ -34,6 +34,8 @@ decoder_config:  configs/train_deepsdf.yaml
 
 # ---- Output ------------------------------------------------
 output_dir: weights/encoder
+# test.py writes: <results_dir>/test_results_<encoder_run>_<grid_resolution>.csv
+results_dir: results
 
 # ---- Encoder training --------------------------------------
 seed:              133
