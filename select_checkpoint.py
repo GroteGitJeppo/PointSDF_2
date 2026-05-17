@@ -186,15 +186,21 @@ def main(cfg: dict, run_dir: str, split: str, also_best_mse: bool):
     # ----- Grid coords (built once) -----
     grid_resolution = cfg.get('grid_resolution', 60)
     grid_bbox = cfg.get('grid_bbox', 0.15)
+    grid_stagger_xy = bool(cfg.get('grid_stagger_xy', False))
     # grid_center shifts the query grid from the origin to the position where the
     # complete laser scans live in the scanner coordinate frame.  Required when
     # the decoder was trained on uncentered data (e.g. corepp weights).
     grid_center = torch.tensor(
         cfg.get('grid_center', [0.0, 0.0, 0.0]), dtype=torch.float, device=device
     )
-    grid_coords = get_volume_coords(resolution=grid_resolution, bbox=grid_bbox).to(device) + grid_center
+    grid_coords = get_volume_coords(
+        resolution=grid_resolution, bbox=grid_bbox, stagger_xy=grid_stagger_xy
+    ).to(device) + grid_center
     center_str = f'  center={grid_center.cpu().tolist()}' if float(grid_center.norm()) > 1e-6 else ''
-    print(f'SDF grid: {grid_resolution}³ = {grid_coords.size(0):,} points  bbox=±{grid_bbox}m{center_str}')
+    print(
+        f'SDF grid: {grid_resolution}³ = {grid_coords.size(0):,} points  '
+        f'bbox=±{grid_bbox}m  stagger_xy={grid_stagger_xy}{center_str}'
+    )
 
     pre_transform = T.Center()
     num_points = cfg.get('num_points', 1024)

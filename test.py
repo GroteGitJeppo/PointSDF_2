@@ -199,6 +199,7 @@ def main(cfg: dict, checkpoint_path: str):
     normalize_half_extent = float(cfg.get('normalize_half_extent', 0.05))
     grid_resolution = cfg.get('grid_resolution', 64)
     grid_bbox = cfg.get('grid_bbox', 0.15)
+    grid_stagger_xy = bool(cfg.get('grid_stagger_xy', False))
 
     hierarchical_decode = bool(cfg.get('hierarchical_decode', False))
     coarse_resolution = int(cfg.get('coarse_resolution', 16))
@@ -229,7 +230,18 @@ def main(cfg: dict, checkpoint_path: str):
         grid_coords = None
     else:
         effective_resolution = grid_resolution
-        grid_coords = get_volume_coords(resolution=grid_resolution, bbox=grid_bbox).to(device) + grid_center
+        grid_coords = get_volume_coords(
+            resolution=grid_resolution, bbox=grid_bbox, stagger_xy=grid_stagger_xy
+        ).to(device) + grid_center
+        center_str = (
+            f'  center={grid_center.cpu().tolist()}'
+            if float(grid_center.norm()) > 1e-6
+            else ''
+        )
+        print(
+            f'SDF grid: {grid_resolution}³ = {grid_coords.size(0):,} points  '
+            f'bbox=±{grid_bbox}m  stagger_xy={grid_stagger_xy}{center_str}'
+        )
 
     # GT point clouds for corepp-compatible Chamfer / P&R
     gt_pcd_dir = cfg.get('gt_pcd_dir', None)
@@ -315,6 +327,7 @@ def main(cfg: dict, checkpoint_path: str):
                     max_fine_queries=max_fine_queries,
                     decode_chunk=decode_chunk,
                     warn_fn=lambda msg: print(f'  {unique_id}: {msg}'),
+                    stagger_xy=grid_stagger_xy,
                 )
             else:
                 latent_tiled = latent.expand(grid_coords.size(0), -1)

@@ -32,7 +32,7 @@ dependencies:
 
   # ── Open3D via conda-forge (CPU-only build; CUDA not required — hull runs on CPU) ─
   # pip open3d wheels are unavailable on this cluster (no PyPI access).
-  # The convex hull in sdf2mesh runs on ≤1500 points so CPU is negligible.
+  # Convex hull in sdf2mesh uses all interior grid points (CPU; matches corepp).
   - conda-forge::open3d>=0.18
 
   # ── pip-installed packages ─────────────────────────────────────────────────

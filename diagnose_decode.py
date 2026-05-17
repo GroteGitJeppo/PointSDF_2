@@ -64,15 +64,18 @@ def main(cfg: dict, split: str) -> None:
 
     grid_resolution = int(cfg.get("grid_resolution", 20))
     grid_bbox = float(cfg.get("grid_bbox", 0.15))
+    grid_stagger_xy = bool(cfg.get("grid_stagger_xy", False))
     grid_center = torch.tensor(
         cfg.get("grid_center", [0.0, 0.0, 0.0]), dtype=torch.float, device=device
     )
-    grid_coords = get_volume_coords(resolution=grid_resolution, bbox=grid_bbox).to(device) + grid_center
+    grid_coords = get_volume_coords(
+        resolution=grid_resolution, bbox=grid_bbox, stagger_xy=grid_stagger_xy
+    ).to(device) + grid_center
 
     center_str = f"  center={grid_center.cpu().tolist()}" if float(grid_center.norm()) > 1e-6 else "  center=[0,0,0]"
     print(
         f"SDF grid: {grid_resolution}³ = {grid_coords.size(0):,} points"
-        f"  bbox=±{grid_bbox} m{center_str}"
+        f"  bbox=±{grid_bbox} m  stagger_xy={grid_stagger_xy}{center_str}"
     )
 
     latent_dir = Path(cfg["latent_dir"])

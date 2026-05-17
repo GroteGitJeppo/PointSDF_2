@@ -77,6 +77,7 @@ def decode_sdf_hierarchical(
     max_fine_queries: int | None = None,
     decode_chunk: int = _DEFAULT_CHUNK,
     warn_fn: Callable[[str], None] | None = None,
+    stagger_xy: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Two-pass SDF decode: coarse grid, surface cells + dilation, then fine vertices
@@ -95,6 +96,8 @@ def decode_sdf_hierarchical(
         max_fine_queries: if set, raise RuntimeError when fine point count exceeds this
         decode_chunk: max rows per decoder forward
         warn_fn: optional callback for fallback messages (e.g. test print)
+        stagger_xy: CoRe++-style half-cell xy offset on coarse grid only (fine pass
+                    stays on a uniform linspace lattice)
 
     Returns:
         (grid_coords, pred_sdf) both on device, shapes (N, 3) and (N, 1)
@@ -110,7 +113,9 @@ def decode_sdf_hierarchical(
         else:
             logger.warning(msg)
 
-    coarse_xyz = get_volume_coords(resolution=R_coarse, bbox=bbox).to(device)
+    coarse_xyz = get_volume_coords(
+        resolution=R_coarse, bbox=bbox, stagger_xy=stagger_xy
+    ).to(device)
     pred_coarse = _decode_in_chunks(
         latent, decoder, coarse_xyz, decode_chunk, clamp_dist
     )

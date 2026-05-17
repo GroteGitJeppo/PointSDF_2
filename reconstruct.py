@@ -205,6 +205,7 @@ def _chamfer_for_latent(
     surface_dilation: int = 1,
     max_fine_queries: int | None = None,
     decode_chunk: int = 131072,
+    stagger_xy: bool = False,
 ) -> float | None:
     """
     Compute corepp-compatible Chamfer distance for one shape given its latent.
@@ -236,9 +237,12 @@ def _chamfer_for_latent(
                 max_fine_queries=max_fine_queries,
                 decode_chunk=decode_chunk,
                 warn_fn=lambda msg: logging.debug("    %s: %s", label, msg),
+                stagger_xy=stagger_xy,
             )
         else:
-            grid_coords = get_volume_coords(resolution=grid_resolution, bbox=bbox).to(device)
+            grid_coords = get_volume_coords(
+                resolution=grid_resolution, bbox=bbox, stagger_xy=stagger_xy
+            ).to(device)
             lat_exp = lat_b.expand(grid_coords.shape[0], -1)
             net_in = torch.cat([lat_exp, grid_coords], dim=1)
             pred_sdf = decoder(net_in)
@@ -370,6 +374,7 @@ def _run_checkpoint(
                     surface_dilation=int(cfg.get("surface_dilation", 1)),
                     max_fine_queries=mfq,
                     decode_chunk=int(cfg.get("hierarchical_decode_chunk", 131072)),
+                    stagger_xy=bool(cfg.get("grid_stagger_xy", False)),
                 )
                 if cd is not None:
                     chamfer_vals.append(cd)

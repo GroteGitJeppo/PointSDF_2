@@ -1,37 +1,49 @@
 """SDF grid, mesh extraction, and DeepSDF loss helpers."""
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.dlpack
 import open3d as o3d
 import open3d.core as o3c
 
-# Maximum number of interior SDF points passed to Open3D's GPU convex hull.
-# stdgpu (Open3D's internal GPU data structure) pre-allocates fixed-size buffers;
-# passing more points causes buffer overflow and silent hull corruption.
-# A convex hull depends only on extreme points, so random subsampling to this
-# limit is geometrically safe for roughly-convex shapes like potato tubers.
-MAX_HULL_POINTS = 1500
-
 
 # ---------------------------------------------------------------------------
 # Volume / mesh extraction
 # ---------------------------------------------------------------------------
 
-def get_volume_coords(resolution: int = 64, bbox: float = 0.15) -> torch.Tensor:
+def get_volume_coords(
+    resolution: int = 64,
+    bbox: float = 0.15,
+    stagger_xy: bool = False,
+) -> torch.Tensor:
     """
-    Generate a uniform 3D grid of query points in [-bbox, bbox]^3.
+    Generate a 3D grid of SDF query points in [-bbox, bbox]^3.
 
     Args:
         resolution: number of grid steps per axis (resolution^3 total points)
         bbox:       half-extent of the bounding box in metres
+        stagger_xy: if True, use CoRe++ Grid3D layout (np.mgrid + half-cell xy
+                    offset on alternating points). Matches
+                    corepp/sdfrenderer/grid.py generate_point_from_bbox.
+                    Callers may still add grid_center after this returns.
 
     Returns:
-        coords: (resolution^3, 3) on CPU
+        coords: (resolution^3, 3) float32 on CPU
     """
-    vals = torch.linspace(-bbox, bbox, resolution)
-    grid = torch.meshgrid(vals, vals, vals, indexing='ij')
-    coords = torch.stack([g.ravel() for g in grid], dim=1)
+    if stagger_xy:
+        density = resolution * 1j
+        X, Y, Z = np.mgrid[-bbox:bbox:density, -bbox:bbox:density, -bbox:bbox:density]
+        grid_np = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
+        half_cell = (float(X.max()) - float(X.min())) / resolution / 2.0
+        grid_np[1::2, :2] += half_cell
+        coords = torch.from_numpy(grid_np.astype(np.float32))
+    else:
+        vals = torch.linspace(-bbox, bbox, resolution)
+        grid = torch.meshgrid(vals, vals, vals, indexing='ij')
+        coords = torch.stack([g.ravel() for g in grid], dim=1)
+
+    assert coords.shape == (resolution ** 3, 3)
     return coords
 
 
@@ -67,14 +79,9 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
             "Try lowering the SDF threshold or increasing grid resolution."
         )
 
-    if keep_points.shape[0] > MAX_HULL_POINTS:
-        idx = torch.randperm(keep_points.shape[0], device=keep_points.device)[:MAX_HULL_POINTS]
-        keep_points = keep_points[idx].contiguous()
-
     # Move to CPU before handing to Open3D. The conda-forge open3d build ships
     # without CUDA support (BUILD_CUDA_MODULE=OFF), so passing a CUDA tensor via
-    # DLPack would raise "Unsupported device CUDA:0". The hull runs on ≤1500
-    # points so CPU overhead is negligible.
+    # DLPack would raise "Unsupported device CUDA:0".
     keep_points_cpu = keep_points.cpu().contiguous()
     o3d_t = o3c.Tensor.from_dlpack(torch.utils.dlpack.to_dlpack(keep_points_cpu))
     pcd_cpu = o3d.t.geometry.PointCloud(o3d_t)
@@ -84,7 +91,7 @@ def sdf2mesh(pred_sdf: torch.Tensor, grid_points: torch.Tensor, t: float = 0.0):
     mesh = _clean_mesh(hull.to_legacy())
 
     while not mesh.is_watertight():
-        voxel_size += 0.005  # match corepp/utils.sdf2mesh_cuda
+        voxel_size += 0.01  # match corepp/utils.sdf2mesh_cuda
         if voxel_size > 0.15:
             raise RuntimeError(
                 "Could not produce a watertight mesh after progressive "

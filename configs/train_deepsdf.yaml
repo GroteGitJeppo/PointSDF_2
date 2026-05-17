@@ -86,6 +86,7 @@ gt_ply_pattern: "*.ply"    # glob pattern inside each label folder
 #
 # Optional: same hierarchical SDF decode as Stage 2 test.py (reconstruct.py Chamfer).
 # When hierarchical_decode is true, grid_resolution below is ignored for meshing.
+# grid_stagger_xy: true   # CoRe++-style query grid (see train_encoder.yaml)
 # hierarchical_decode: false
 # grid_resolution: 64
 # coarse_resolution: 16
