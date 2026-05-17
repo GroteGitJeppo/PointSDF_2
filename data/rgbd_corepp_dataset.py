@@ -27,7 +27,9 @@ def load_intrinsics(intrinsics_file: str):
         data["intrinsic_matrix"][6],
         data["intrinsic_matrix"][7],
     )
-    return intrinsics, data["depth_scale"]
+    # 3DPotatoTwin intrinsic JSON has no depth_scale; RealSense D405 uses mm (1000).
+    depth_scale = float(data.get("depth_scale", 1000.0))
+    return intrinsics, depth_scale
 
 
 def histogram_filtering(dimg, mask, max_depth_range=50, max_depth_contribution=0.05):
