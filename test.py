@@ -214,8 +214,12 @@ def _decode_volume(
     max_fine_queries: int | None,
     decode_chunk: int,
     unique_id: str,
-) -> tuple[torch.Tensor | None, object | None, float]:
-    """Run SDF decode + convex hull; return (grid_coords, mesh, pred_volume_ml)."""
+) -> tuple[torch.Tensor | None, object | None, float, float, float]:
+    """Run SDF decode + convex hull.
+
+    Returns (grid_coords, mesh, pred_volume_ml, decoder_ms, convex_hull_ms).
+    """
+    t_dec0 = timeit.default_timer()
     if hierarchical_decode:
         grid_coords, pred_sdf = decode_sdf_hierarchical(
             latent=latent,
@@ -234,9 +238,13 @@ def _decode_volume(
         latent_tiled = latent.expand(grid_coords.size(0), -1)
         decoder_input = torch.cat([latent_tiled, grid_coords], dim=1)
         pred_sdf = decoder(decoder_input)
+    _sync_cuda(device)
+    t_dec1 = timeit.default_timer()
+    decoder_ms = (t_dec1 - t_dec0) * 1e3
 
     pred_volume = float("nan")
     mesh = None
+    t_hull0 = timeit.default_timer()
     try:
         mesh = sdf2mesh(pred_sdf, grid_coords)
         if mesh.is_watertight():
@@ -245,7 +253,10 @@ def _decode_volume(
             mesh.translate(-grid_center.cpu().numpy())
     except (ValueError, RuntimeError) as e:
         print(f"  Mesh extraction failed for {unique_id}: {e}")
-    return grid_coords, mesh, pred_volume
+    _sync_cuda(device)
+    t_hull1 = timeit.default_timer()
+    convex_hull_ms = (t_hull1 - t_hull0) * 1e3
+    return grid_coords, mesh, pred_volume, decoder_ms, convex_hull_ms
 
 
 def main(cfg: dict, checkpoint_path: str):
@@ -420,8 +431,7 @@ def main(cfg: dict, checkpoint_path: str):
         latent_save_ms: float,
     ) -> None:
         nonlocal grid_coords
-        t_dec0 = timeit.default_timer()
-        grid_coords, mesh, pred_volume = _decode_volume(
+        grid_coords, mesh, pred_volume, decoder_ms, convex_hull_ms = _decode_volume(
             latent=latent,
             decoder=decoder,
             device=device,
@@ -436,10 +446,6 @@ def main(cfg: dict, checkpoint_path: str):
             decode_chunk=decode_chunk,
             unique_id=unique_id,
         )
-        _sync_cuda(device)
-        t_hull1 = timeit.default_timer()
-        decoder_ms = (t_hull1 - t_dec0) * 1e3
-        convex_hull_ms = 0.0
 
         chamfer_mm = float('nan')
         prec = float('nan')
