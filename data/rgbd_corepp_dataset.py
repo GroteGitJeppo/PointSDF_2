@@ -12,6 +12,7 @@ import open3d as o3d
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import Compose
+from torchvision.transforms import v2
 
 from data.corepp_transforms import Pad
 
@@ -146,7 +147,10 @@ class RgbdCoreppDataset(Dataset):
         self.normalize_depth = normalize_depth
         self.depth_min = depth_min
         self.depth_max = depth_max
-        self.tf = Compose([Pad(size=input_size)])
+        self.tf = Compose([
+            Pad(size=input_size),
+            v2.Resize((input_size, input_size), antialias=True),
+        ])
 
         split_path = os.path.join(data_root, "split.json")
         with open(split_path, encoding="utf-8") as f:

@@ -9,8 +9,9 @@ from torchvision.transforms import v2
 
 def get_padding(image, size):
     w, h = image.size
-    h_padding = (max_wh := size) - w
-    v_padding = max_wh - h
+    max_wh = size
+    h_padding = (max_wh - w) / 2
+    v_padding = (max_wh - h) / 2
     l_pad = h_padding if h_padding % 1 == 0 else h_padding + 0.5
     t_pad = v_padding if v_padding % 1 == 0 else v_padding + 0.5
     r_pad = h_padding if h_padding % 1 == 0 else h_padding - 0.5

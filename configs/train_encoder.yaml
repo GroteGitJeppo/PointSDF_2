@@ -44,7 +44,7 @@ encoder:
   depth_min: 230
   depth_max: 350
   rgbd_data_dir: data/3DPotatoTwin/corepp_rgbd
-  corepp_weights: weights/encoder/corepp/_super3d_32_best_model.pt
+  corepp_weights: weights/encoder/corepp/_super3d_32_final_model.pt
 
 # ---- Output ------------------------------------------------
 output_dir: weights/encoder
